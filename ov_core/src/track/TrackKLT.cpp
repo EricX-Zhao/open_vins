@@ -29,6 +29,8 @@
 #include "utils/opencv_lambda_body.h"
 #include "utils/print.h"
 
+#include <Eigen/Geometry>
+
 using namespace ov_core;
 
 void TrackKLT::feed_new_camera(const CameraData &message) {
@@ -133,6 +135,21 @@ void TrackKLT::feed_monocular(const CameraData &message, size_t msg_id) {
   // Our return success masks, and predicted new features
   std::vector<uchar> mask_ll;
   std::vector<cv::KeyPoint> pts_left_new = pts_left_old;
+
+  // IMU-aided initial prediction: rotate feature positions using gyro integration.
+  // This gives KLT a much better starting point during fast rotations and removes
+  // the need for a large search window.
+  double t_last = t_last_cam_.count(cam_id) ? t_last_cam_.at(cam_id) : -1.0;
+  if (t_last > 0 && !R_ItoC_.empty()) {
+    Eigen::Matrix3d R_CtoC = integrate_gyro_between(cam_id, t_last, message.timestamp);
+    bool is_identity = R_CtoC.isApprox(Eigen::Matrix3d::Identity(), 1e-8);
+    if (!is_identity) {
+      warp_points_by_rotation(pts_left_new, cam_id, R_CtoC, img.cols, img.rows);
+      PRINT_DEBUG("[KLT-IMU]: cam%zu gyro-warped %zu pts (t_delta=%.3fs)\n", cam_id,
+                  pts_left_new.size(), message.timestamp - t_last);
+    }
+  }
+  t_last_cam_[cam_id] = message.timestamp;
 
   // Lets track temporally
   perform_matching(img_pyramid_last[cam_id], imgpyr, pts_left_old, pts_left_new, cam_id, cam_id, mask_ll);
@@ -255,6 +272,26 @@ void TrackKLT::feed_stereo(const CameraData &message, size_t msg_id_left, size_t
   std::vector<uchar> mask_ll, mask_rr;
   std::vector<cv::KeyPoint> pts_left_new = pts_left_old;
   std::vector<cv::KeyPoint> pts_right_new = pts_right_old;
+
+  // IMU-aided initial prediction for stereo (use left camera extrinsics for both)
+  double t_last_stereo = t_last_cam_.count(cam_id_left) ? t_last_cam_.at(cam_id_left) : -1.0;
+  if (t_last_stereo > 0 && !R_ItoC_.empty()) {
+    Eigen::Matrix3d R_CtoC_left = integrate_gyro_between(cam_id_left, t_last_stereo, message.timestamp);
+    if (!R_CtoC_left.isApprox(Eigen::Matrix3d::Identity(), 1e-8)) {
+      warp_points_by_rotation(pts_left_new, cam_id_left, R_CtoC_left, img_left.cols, img_left.rows);
+      if (R_ItoC_.count(cam_id_right)) {
+        const Eigen::Matrix3d &R_ItoC_r = R_ItoC_.at(cam_id_right);
+        const Eigen::Matrix3d &R_ItoC_l = R_ItoC_.at(cam_id_left);
+        // R_ItoI same; convert to right camera frame
+        Eigen::Matrix3d R_ItoC_l_inv = R_ItoC_l.transpose();
+        Eigen::Matrix3d R_ItoI = R_ItoC_l_inv * R_CtoC_left * R_ItoC_l; // approximate
+        Eigen::Matrix3d R_CtoC_right = R_ItoC_r * R_ItoI * R_ItoC_r.transpose();
+        warp_points_by_rotation(pts_right_new, cam_id_right, R_CtoC_right, img_right.cols, img_right.rows);
+      }
+    }
+  }
+  t_last_cam_[cam_id_left] = message.timestamp;
+  t_last_cam_[cam_id_right] = message.timestamp;
 
   // Lets track temporally
   parallel_for_(cv::Range(0, 2), LambdaBody([&](const cv::Range &range) {
@@ -866,21 +903,113 @@ void TrackKLT::perform_matching(const std::vector<cv::Mat> &img0pyr, const std::
   }
 
   // Do RANSAC outlier rejection (note since we normalized the max pixel error is now in the normalized cords)
+  // Under pure rotation the fundamental matrix is degenerate (t=0 → E=0).
+  // In that case use homography RANSAC which is well-defined and avoids mass-rejections.
   std::vector<uchar> mask_rsc;
   double max_focallength_img0 = std::max(camera_calib.at(id0)->get_K()(0, 0), camera_calib.at(id0)->get_K()(1, 1));
   double max_focallength_img1 = std::max(camera_calib.at(id1)->get_K()(0, 0), camera_calib.at(id1)->get_K()(1, 1));
   double max_focallength = std::max(max_focallength_img0, max_focallength_img1);
-  cv::findFundamentalMat(pts0_n, pts1_n, cv::FM_RANSAC, 2.0 / max_focallength, 0.999, mask_rsc);
+  if (use_homography_ransac_) {
+    // Use a looser threshold (5px in pixel space) for homography RANSAC.
+    // The 2px default is too tight for mixed rotation+translation: it rejects
+    // correctly-tracked features whose residual slightly exceeds the threshold
+    // due to translational parallax or gyro-prediction residual.
+    cv::findHomography(pts0_n, pts1_n, cv::RANSAC, 5.0 / max_focallength, mask_rsc, 2000, 0.999);
+  } else {
+    cv::findFundamentalMat(pts0_n, pts1_n, cv::FM_RANSAC, 2.0 / max_focallength, 0.999, mask_rsc);
+  }
 
   // Loop through and record only ones that are valid
+  int ct_klt_ok = 0, ct_rsc_ok = 0, ct_klt_fail = 0, ct_rsc_fail = 0;
+  double sum_disp = 0.0;
+  int ct_disp = 0;
   for (size_t i = 0; i < mask_klt.size(); i++) {
-    auto mask = (uchar)((i < mask_klt.size() && mask_klt[i] && i < mask_rsc.size() && mask_rsc[i]) ? 1 : 0);
+    bool klt_ok = (i < mask_klt.size() && mask_klt[i]);
+    bool rsc_ok = (i < mask_rsc.size() && mask_rsc[i]);
+    if (klt_ok) {
+      ct_klt_ok++;
+      double dx = pts1[i].x - pts0[i].x;
+      double dy = pts1[i].y - pts0[i].y;
+      sum_disp += std::sqrt(dx * dx + dy * dy);
+      ct_disp++;
+      if (!rsc_ok) ct_rsc_fail++;  // KLT passed but RANSAC killed it
+      else ct_rsc_ok++;
+    } else {
+      ct_klt_fail++;
+    }
+    auto mask = (uchar)((klt_ok && rsc_ok) ? 1 : 0);
     mask_out.push_back(mask);
   }
+  double avg_disp = (ct_disp > 0) ? sum_disp / ct_disp : 0.0;
+  PRINT_DEBUG("[KLT-MATCH]: in=%d  klt_ok=%d(fail=%d)  ransac_ok=%d(killed=%d)  final=%d  avg_disp=%.1fpx\n",
+              (int)pts0.size(), ct_klt_ok, ct_klt_fail, ct_rsc_ok, ct_rsc_fail, ct_rsc_ok, avg_disp);
 
   // Copy back the updated positions
   for (size_t i = 0; i < pts0.size(); i++) {
     kpts0.at(i).pt = pts0.at(i);
     kpts1.at(i).pt = pts1.at(i);
+  }
+}
+
+Eigen::Matrix3d TrackKLT::integrate_gyro_between(size_t cam_id, double t_start, double t_end) {
+  if (R_ItoC_.find(cam_id) == R_ItoC_.end())
+    return Eigen::Matrix3d::Identity();
+
+  // Snapshot the buffer under the lock
+  std::vector<ImuData> imu_snap;
+  {
+    std::lock_guard<std::mutex> lck(mtx_imu_buf_);
+    for (const auto &d : imu_data_buf_) {
+      if (d.timestamp > t_start && d.timestamp <= t_end)
+        imu_snap.push_back(d);
+    }
+  }
+
+  if (imu_snap.empty())
+    return Eigen::Matrix3d::Identity();
+
+  // Trapezoidal gyro integration in IMU frame
+  Eigen::Matrix3d R_ItoI = Eigen::Matrix3d::Identity();
+  for (size_t i = 0; i + 1 < imu_snap.size(); i++) {
+    double dt = imu_snap[i + 1].timestamp - imu_snap[i].timestamp;
+    if (dt <= 0)
+      continue;
+    Eigen::Vector3d w_avg = 0.5 * (imu_snap[i].wm + imu_snap[i + 1].wm);
+    double angle = w_avg.norm() * dt;
+    Eigen::Matrix3d dR = Eigen::AngleAxisd(angle, (angle > 1e-10) ? (w_avg / w_avg.norm()).eval() : Eigen::Vector3d::UnitZ()).toRotationMatrix();
+    R_ItoI = dR * R_ItoI;
+  }
+  // Handle single reading: use it alone with a tiny dt estimate
+  if (imu_snap.size() == 1) {
+    double dt = t_end - t_start;
+    Eigen::Vector3d w = imu_snap[0].wm;
+    double angle = w.norm() * dt;
+    R_ItoI = Eigen::AngleAxisd(angle, (angle > 1e-10) ? (w / w.norm()).eval() : Eigen::Vector3d::UnitZ()).toRotationMatrix();
+  }
+
+  // Convert to camera frame: R_CtoC = R_ItoC * R_ItoI * R_ItoC^T
+  const Eigen::Matrix3d &R_ItoC = R_ItoC_.at(cam_id);
+  return R_ItoC * R_ItoI * R_ItoC.transpose();
+}
+
+void TrackKLT::warp_points_by_rotation(std::vector<cv::KeyPoint> &pts, size_t cam_id, const Eigen::Matrix3d &R_CtoC, int img_cols,
+                                       int img_rows) {
+  auto &cam = camera_calib.at(cam_id);
+  for (auto &kp : pts) {
+    // Undistort to normalized camera coords
+    Eigen::Vector2f p_n = cam->undistort_f(Eigen::Vector2f(kp.pt.x, kp.pt.y));
+    // Build camera ray and rotate
+    Eigen::Vector3d ray(p_n(0), p_n(1), 1.0);
+    Eigen::Vector3d ray_new = R_CtoC * ray;
+    if (ray_new(2) < 1e-6)
+      continue; // point behind camera after rotation — leave unchanged
+    // Normalize and re-distort
+    Eigen::Vector2f p_n_new(ray_new(0) / ray_new(2), ray_new(1) / ray_new(2));
+    Eigen::Vector2f p_px_new = cam->distort_f(p_n_new);
+    // Only update if within image bounds
+    if (p_px_new(0) >= 0 && p_px_new(0) < img_cols && p_px_new(1) >= 0 && p_px_new(1) < img_rows) {
+      kp.pt.x = p_px_new(0);
+      kp.pt.y = p_px_new(1);
+    }
   }
 }

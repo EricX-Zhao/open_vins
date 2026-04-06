@@ -130,9 +130,15 @@ VioManager::VioManager(VioManagerOptions &params_) : thread_init_running(false),
   // NOTE: we will split the total number of features over all cameras uniformly
   int init_max_features = std::floor((double)params.init_options.init_max_features / (double)params.state_options.num_cameras);
   if (params.use_klt) {
+    // Build R_ItoC map from initial calibration so TrackKLT can use gyro prediction
+    std::map<size_t, Eigen::Matrix3d> R_ItoC_map;
+    for (const auto &kv : state->_calib_IMUtoCAM) {
+      R_ItoC_map[kv.first] = kv.second->Rot();
+    }
     trackFEATS = std::shared_ptr<TrackBase>(new TrackKLT(state->_cam_intrinsics_cameras, init_max_features,
                                                          state->_options.max_aruco_features, params.use_stereo, params.histogram_method,
-                                                         params.fast_threshold, params.grid_x, params.grid_y, params.min_px_dist));
+                                                         params.fast_threshold, params.grid_x, params.grid_y, params.min_px_dist,
+                                                         R_ItoC_map, params.use_homography_ransac));
   } else {
     trackFEATS = std::shared_ptr<TrackBase>(new TrackDescriptor(
         state->_cam_intrinsics_cameras, init_max_features, state->_options.max_aruco_features, params.use_stereo, params.histogram_method,
@@ -175,6 +181,9 @@ void VioManager::feed_measurement_imu(const ov_core::ImuData &message) {
     oldest_time = message.timestamp - params.init_options.init_window_time + state->_calib_dt_CAMtoIMU->value()(0) - 0.10;
   }
   propagator->feed_imu(message, oldest_time);
+
+  // Feed IMU to tracker so it can use gyro prediction for KLT initial guess
+  trackFEATS->feed_imu(message);
 
   // Push back to our initializer
   if (!is_initialized_vio) {
@@ -469,10 +478,15 @@ void VioManager::do_feature_propagate_update(const ov_core::CameraData &message)
     assert(landmark.second->_unique_camera_id != -1);
     bool current_unique_cam =
         std::find(message.sensor_ids.begin(), message.sensor_ids.end(), landmark.second->_unique_camera_id) != message.sensor_ids.end();
-    if (feat2 == nullptr && current_unique_cam)
+    if (feat2 == nullptr && current_unique_cam) {
+      PRINT_DEBUG("[SLAM-MARG]: feat %d marked for marg — lost tracking (feat2=null)\n", (int)landmark.second->_featid);
       landmark.second->should_marg = true;
-    if (landmark.second->update_fail_count > 1)
+    }
+    if (landmark.second->update_fail_count > 1) {
+      PRINT_DEBUG("[SLAM-MARG]: feat %d marked for marg — update_fail_count=%d > 1\n", (int)landmark.second->_featid,
+                  landmark.second->update_fail_count);
       landmark.second->should_marg = true;
+    }
   }
 
   // Lets marginalize out all old SLAM features here
@@ -656,7 +670,8 @@ void VioManager::do_feature_propagate_update(const ov_core::CameraData &message)
              state->_imu->pos()(2), distance);
   PRINT_INFO("bg = %.4f,%.4f,%.4f | ba = %.4f,%.4f,%.4f\n", state->_imu->bias_g()(0), state->_imu->bias_g()(1), state->_imu->bias_g()(2),
              state->_imu->bias_a()(0), state->_imu->bias_a()(1), state->_imu->bias_a()(2));
-
+  PRINT_INFO("v_IinG = %.3f,%.3f,%.3f\n", state->_imu->vel()(0), state->_imu->vel()(1), state->_imu->vel()(2));
+  // PRINT_INFO("v_covar = %.4f\n", state->max_covariance_size());
   // Debug for camera imu offset
   if (state->_options.do_calib_camera_timeoffset) {
     PRINT_INFO("camera-imu timeoffset = %.5f\n", state->_calib_dt_CAMtoIMU->value()(0));

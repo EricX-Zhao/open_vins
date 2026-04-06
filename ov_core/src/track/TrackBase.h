@@ -23,6 +23,7 @@
 #define OV_CORE_TRACK_BASE_H
 
 #include <atomic>
+#include <deque>
 #include <iostream>
 #include <mutex>
 #include <thread>
@@ -193,6 +194,38 @@ protected:
 
   // Timing variables (most children use these...)
   boost::posix_time::ptime rT1, rT2, rT3, rT4, rT5, rT6, rT7;
+
+  /// Last image timestamp recorded for each camera (used for gyro integration).
+  std::map<size_t, double> t_last_cam_;
+
+  /// IMU buffer shared across all cameras in this tracker.
+  std::deque<ImuData> imu_data_buf_;
+  std::mutex mtx_imu_buf_;
+
+public:
+  // ---------------------------------------------------------------
+  // IMU-aided KLT prediction support
+  // ---------------------------------------------------------------
+
+  /// Feed a raw IMU measurement into the tracker's internal buffer.
+  /// Call this from VioManager::feed_imu() so the tracker always has
+  /// fresh gyro data available when the next image arrives.
+  void feed_imu(const ImuData &data) {
+    std::lock_guard<std::mutex> lck(mtx_imu_buf_);
+    imu_data_buf_.push_back(data);
+    // Keep the buffer bounded (2 seconds at 400 Hz = 800 readings)
+    while (imu_data_buf_.size() > 800)
+      imu_data_buf_.pop_front();
+  }
+
+  /// Rotation from IMU body frame to camera frame, one entry per camera id.
+  /// Set this once at construction time (or whenever extrinsics change).
+  std::map<size_t, Eigen::Matrix3d> R_ItoC_;
+
+  /// If true, use homography RANSAC instead of fundamental-matrix RANSAC
+  /// for temporal outlier rejection.  Homography is well-defined under pure
+  /// rotation (where F is degenerate) and gives dramatically better results.
+  bool use_homography_ransac_ = false;
 };
 
 } // namespace ov_core

@@ -25,7 +25,7 @@
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
 #include <geometry_msgs/msg/transform_stamped.hpp>
-#include <image_transport/image_transport.h>
+#include <image_transport/image_transport.hpp>
 #include <message_filters/subscriber.h>
 #include <message_filters/sync_policies/approximate_time.h>
 #include <message_filters/time_synchronizer.h>
@@ -42,7 +42,7 @@
 #include <std_msgs/msg/float64.hpp>
 #include <tf2/LinearMath/Quaternion.h>
 #include <tf2/transform_datatypes.h>
-#include <tf2_geometry_msgs/tf2_geometry_msgs.h>
+#include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 #include <tf2_ros/transform_broadcaster.h>
 
 #include <atomic>
@@ -53,7 +53,7 @@
 #include <Eigen/Eigen>
 #include <boost/date_time/posix_time/posix_time.hpp>
 #include <boost/filesystem.hpp>
-#include <cv_bridge/cv_bridge.h>
+#include <cv_bridge/cv_bridge.hpp>
 
 namespace ov_core {
 class YamlParser;
@@ -161,6 +161,10 @@ protected:
   typedef message_filters::sync_policies::ApproximateTime<sensor_msgs::msg::Image, sensor_msgs::msg::Image> sync_pol;
   std::vector<std::shared_ptr<message_filters::Synchronizer<sync_pol>>> sync_cam;
   std::vector<std::shared_ptr<message_filters::Subscriber<sensor_msgs::msg::Image>>> sync_subs_cam;
+  rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr fcs_odom_sub_;
+  bool is_first_odom_ = true;
+  float fcs_init_height_ = 0.0;
+  std::atomic<float> fcs_odom_height_;
 
   // For path viz
   std::vector<geometry_msgs::msg::PoseStamped> poses_imu;

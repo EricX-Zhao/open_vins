@@ -438,6 +438,11 @@ struct VioManagerOptions {
   /// KNN ration between top two descriptor matcher which is required to be a good match
   double knn_ratio = 0.85;
 
+  /// If true, use homography RANSAC instead of fundamental-matrix RANSAC for KLT outlier rejection.
+  /// Homography is well-defined under pure rotation (F is degenerate when t=0) and avoids the
+  /// mass-rejection of valid feature correspondences that occurs during fast yaw rotations.
+  bool use_homography_ransac = false;
+
   /// Frequency we want to track images at (higher freq ones will be dropped)
   double track_frequency = 20.0;
 
@@ -482,6 +487,7 @@ struct VioManagerOptions {
       }
       parser->parse_config("knn_ratio", knn_ratio);
       parser->parse_config("track_frequency", track_frequency);
+      parser->parse_config("use_homography_ransac", use_homography_ransac, false);
     }
     PRINT_DEBUG("FEATURE TRACKING PARAMETERS:\n");
     PRINT_DEBUG("  - use_stereo: %d\n", use_stereo);
@@ -499,6 +505,7 @@ struct VioManagerOptions {
     PRINT_DEBUG("  - hist method: %d\n", (int)histogram_method);
     PRINT_DEBUG("  - knn ratio: %.3f\n", knn_ratio);
     PRINT_DEBUG("  - track frequency: %.1f\n", track_frequency);
+    PRINT_DEBUG("  - use_homography_ransac: %d\n", use_homography_ransac);
     featinit_options.print(parser);
   }
 

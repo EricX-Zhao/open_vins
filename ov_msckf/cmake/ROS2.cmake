@@ -13,6 +13,7 @@ find_package(cv_bridge REQUIRED)
 find_package(image_transport REQUIRED)
 find_package(ov_core REQUIRED)
 find_package(ov_init REQUIRED)
+find_package(apexpilot_logger REQUIRED)
 
 # Describe ROS project
 option(ENABLE_ROS "Enable or disable building with ROS (if it is found)" ON)
@@ -70,7 +71,7 @@ list(APPEND LIBRARY_SOURCES src/ros/ROS2Visualizer.cpp src/ros/ROSVisualizerHelp
 file(GLOB_RECURSE LIBRARY_HEADERS "src/*.h")
 add_library(ov_msckf_lib SHARED ${LIBRARY_SOURCES} ${LIBRARY_HEADERS})
 ament_target_dependencies(ov_msckf_lib ${ament_libraries})
-target_link_libraries(ov_msckf_lib ${thirdparty_libraries})
+target_link_libraries(ov_msckf_lib ${thirdparty_libraries} apexpilot_logger::apexpilot_logger)
 target_include_directories(ov_msckf_lib PUBLIC src/)
 install(TARGETS ov_msckf_lib
         LIBRARY DESTINATION lib

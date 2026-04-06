@@ -413,6 +413,8 @@ void UpdaterSLAM::update(std::shared_ptr<State> state, std::vector<std::shared_p
                       chi2_multipler * chi2_check);
       } else {
         landmark->update_fail_count++;
+        PRINT_DEBUG(YELLOW "[SLAM-UP]: chi2 rejected feat %d — chi2=%.3f > thr=%.3f (dof=%d, fail_count=%d)\n" RESET,
+                    (int)feat.featid, chi2, chi2_multipler * chi2_check, res.rows(), landmark->update_fail_count);
       }
       (*it2)->to_delete = true;
       it2 = feature_vec.erase(it2);

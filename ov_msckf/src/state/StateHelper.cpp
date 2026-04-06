@@ -635,6 +635,8 @@ void StateHelper::marginalize_slam(std::shared_ptr<State> state) {
   auto it0 = state->_features_SLAM.begin();
   while (it0 != state->_features_SLAM.end()) {
     if ((*it0).second->should_marg && (int)(*it0).first > 4 * state->_options.max_aruco_features) {
+      PRINT_DEBUG("[SLAM-MARG]: marginalizing feat %d (fail_count=%d)\n", (int)(*it0).second->_featid,
+                  (*it0).second->update_fail_count);
       StateHelper::marginalize(state, (*it0).second);
       it0 = state->_features_SLAM.erase(it0);
       ct_marginalized++;

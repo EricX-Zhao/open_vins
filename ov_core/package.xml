@@ -38,6 +38,7 @@
     <depend>libopencv-dev</depend>
     <depend>libopencv-contrib-dev</depend>
     <depend>boost</depend>
+    <depend>apexpilot_logger</depend>
 
     <!-- Note the export is required to expose the executables -->
     <export>

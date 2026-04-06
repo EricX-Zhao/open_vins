@@ -75,6 +75,18 @@ public:
   void feed_measurement_imu(const ov_core::ImuData &message);
 
   /**
+   * @brief Set the current camera height above ground (from barometer / rangefinder).
+   *
+   * This is used by the homography updater to recover the metric translation
+   * between frames from the homography decomposition (t_actual = height * t/d).
+   * Call this just before feeding a camera image.
+   * Thread-safe (atomic store).
+   *
+   * @param height Height above ground in meters (must be > 0 to be used)
+   */
+  void set_cam_height(double height) { _cam_height.store(height); }
+
+  /**
    * @brief Feed function for camera measurements
    * @param message Contains our timestamp, images, and camera ids
    */
@@ -224,6 +236,9 @@ protected:
 
   // Threads and their atomics
   std::atomic<bool> thread_init_running, thread_init_success;
+
+  /// Camera height above ground in meters (set via set_cam_height, used by homography updater)
+  std::atomic<double> _cam_height{-1.0};
 
   // If we did a zero velocity update
   bool did_zupt_update = false;

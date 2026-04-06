@@ -22,6 +22,8 @@
 #ifndef OV_CORE_COLOR_MACROS
 #define OV_CORE_COLOR_MACROS
 
+#if defined (USE_COLOR_MACROS)
+
 #define RESET "\033[0m"
 #define BLACK "\033[30m"                /* Black */
 #define RED "\033[31m"                  /* Red */
@@ -41,5 +43,28 @@
 #define BOLDCYAN "\033[1m\033[36m"      /* Bold Cyan */
 #define BOLDWHITE "\033[1m\033[37m"     /* Bold White */
 #define BOLDREDPURPLE "\033[1m\033[95m" /* Bold Red Purple */
+
+#else
+
+#define RESET 
+#define BLACK 
+#define RED 
+#define GREEN 
+#define YELLOW 
+#define BLUE 
+#define MAGENTA 
+#define CYAN 
+#define WHITE 
+#define REDPURPLE 
+#define BOLDBLACK 
+#define BOLDRED 
+#define BOLDGREEN 
+#define BOLDYELLOW 
+#define BOLDBLUE 
+#define BOLDMAGENTA 
+#define BOLDCYAN 
+#define BOLDWHITE 
+#define BOLDREDPURPLE 
+#endif
 
 #endif /* OV_CORE_COLOR_MACROS */

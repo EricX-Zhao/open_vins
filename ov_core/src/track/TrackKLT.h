@@ -52,9 +52,13 @@ public:
    * @param minpxdist features need to be at least this number pixels away from each other
    */
   explicit TrackKLT(std::unordered_map<size_t, std::shared_ptr<CamBase>> cameras, int numfeats, int numaruco, bool stereo,
-                    HistogramMethod histmethod, int fast_threshold, int gridx, int gridy, int minpxdist)
+                    HistogramMethod histmethod, int fast_threshold, int gridx, int gridy, int minpxdist,
+                    std::map<size_t, Eigen::Matrix3d> R_ItoC = {}, bool use_homo_ransac = false)
       : TrackBase(cameras, numfeats, numaruco, stereo, histmethod), threshold(fast_threshold), grid_x(gridx), grid_y(gridy),
-        min_px_dist(minpxdist) {}
+        min_px_dist(minpxdist) {
+    R_ItoC_ = std::move(R_ItoC);
+    use_homography_ransac_ = use_homo_ransac;
+  }
 
   /**
    * @brief Process a new image
@@ -142,6 +146,35 @@ protected:
   // How many pyramid levels to track
   int pyr_levels = 5;
   cv::Size win_size = cv::Size(15, 15);
+
+  /**
+   * @brief Integrate buffered gyro readings to get R_CtoC between two timestamps.
+   *
+   * Integrates all IMU readings in [t_start, t_end] using trapezoidal rule and
+   * converts from IMU body frame to camera frame using R_ItoC_.
+   * Returns identity if the IMU buffer is empty or R_ItoC_ is not set for cam_id.
+   *
+   * @param cam_id  Camera whose extrinsic (R_ItoC_) to apply
+   * @param t_start Start time (exclusive lower bound)
+   * @param t_end   End time (inclusive upper bound, = current image timestamp)
+   * @return R_CtoC rotation matrix in camera frame
+   */
+  Eigen::Matrix3d integrate_gyro_between(size_t cam_id, double t_start, double t_end);
+
+  /**
+   * @brief Warp a set of keypoints by a rotation R_CtoC (camera-frame rotation).
+   *
+   * For each keypoint: undistort → rotate 3-D ray → re-distort.
+   * Points that project outside the image boundary are left at their original position
+   * (KLT will mark them as failed naturally).
+   *
+   * @param pts     Keypoints to warp in-place
+   * @param cam_id  Camera id (for intrinsic model)
+   * @param R_CtoC  Rotation matrix in camera frame (from prev to curr)
+   * @param img_cols Image width  (bounds check)
+   * @param img_rows Image height (bounds check)
+   */
+  void warp_points_by_rotation(std::vector<cv::KeyPoint> &pts, size_t cam_id, const Eigen::Matrix3d &R_CtoC, int img_cols, int img_rows);
 
   // Last set of image pyramids
   std::map<size_t, std::vector<cv::Mat>> img_pyramid_last;

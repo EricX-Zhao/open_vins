@@ -31,6 +31,7 @@
 #elif ROS_AVAILABLE == 2
 #include "ros/ROS2Visualizer.h"
 #include <rclcpp/rclcpp.hpp>
+#include "apexpilot_logger/logging.hpp"
 #endif
 
 using namespace ov_msckf;
@@ -62,8 +63,21 @@ int main(int argc, char **argv) {
   rclcpp::NodeOptions options;
   options.allow_undeclared_parameters(true);
   options.automatically_declare_parameters_from_overrides(true);
+
+  rclcpp::executors::MultiThreadedExecutor executor;
+
   auto node = std::make_shared<rclcpp::Node>("run_subscribe_msckf", options);
   node->get_parameter<std::string>("config_path", config_path);
+
+  std::string log_dir = "/tmp";
+  node->get_parameter<std::string>("log_dir", log_dir);
+  std::cout<<"Log dir : "<<log_dir<<std::endl;
+
+  apexpilot::LoggerOption log_options;
+  log_options.log_level = "debug";
+  log_options.log_dir = log_dir;
+  log_options.std_output = true;
+  apexpilot::create_logger("openvins", log_options);
 #endif
 
   // Load the config
@@ -94,8 +108,8 @@ int main(int argc, char **argv) {
 
   // Ensure we read in all parameters required
   if (!parser->successful()) {
-    PRINT_ERROR(RED "unable to parse all parameters, please fix\n" RESET);
-    std::exit(EXIT_FAILURE);
+    std::cerr<<"unable to parse all parameters, please fix"<<std::endl;
+    goto error_exit;
   }
 
   // Spin off to ROS
@@ -107,13 +121,16 @@ int main(int argc, char **argv) {
   ros::waitForShutdown();
 #elif ROS_AVAILABLE == 2
   // rclcpp::spin(node);
-  rclcpp::executors::MultiThreadedExecutor executor;
   executor.add_node(node);
   executor.spin();
 #endif
 
+error_exit:
   // Final visualization
   viz->visualize_final();
+  viz.reset();
+  sys.reset();
+  apexpilot::drop("openvins");
 #if ROS_AVAILABLE == 1
   ros::shutdown();
 #elif ROS_AVAILABLE == 2
