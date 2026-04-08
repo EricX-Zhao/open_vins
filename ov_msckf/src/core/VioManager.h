@@ -50,6 +50,7 @@ class StateHelper;
 class UpdaterMSCKF;
 class UpdaterSLAM;
 class UpdaterZeroVelocity;
+class UpdaterPureYaw;
 class Propagator;
 
 /**
@@ -217,6 +218,9 @@ protected:
 
   /// Our zero velocity tracker
   std::shared_ptr<UpdaterZeroVelocity> updaterZUPT;
+
+  /// Our pure-yaw rotation updater (depth-pin + rotation bias update at altitude)
+  std::shared_ptr<UpdaterPureYaw> updaterPureYaw;
 
   /// This is the queue of measurement times that have come in since we starting doing initialization
   /// After we initialize, we will want to prop & update to the latest timestamp quickly

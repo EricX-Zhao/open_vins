@@ -118,6 +118,9 @@ void UpdaterSLAM::delayed_init(std::shared_ptr<State> state, std::vector<std::sh
   }
 
   // 3. Try to triangulate all MSCKF or new SLAM features that have measurements
+  std::set<size_t> feat_plane_fail_to_skip;
+  std::set<size_t> features_with_alt_fix;
+  std::map<size_t, Eigen::Vector3d> features_p_FinG_original;
   auto it1 = feature_vec.begin();
   while (it1 != feature_vec.end()) {
 
@@ -134,6 +137,100 @@ void UpdaterSLAM::delayed_init(std::shared_ptr<State> state, std::vector<std::sh
     if (initializer_feat->config().refine_features) {
       success_refine = initializer_feat->single_gaussnewton(*it1, clones_cam);
     }
+
+    // Altitude-based depth correction for downward-facing camera.
+    // Use anchor camera height and feature bearing to compute the expected depth via
+    // ray-ground intersection (depth_alt), then correct both:
+    //   • underestimates: depth_gn < 0.85 * depth_alt — degenerate geometry during rotation
+    //     (small translational baseline → DLT/GN converges to shallow depth)
+    //   • overestimates:  depth_gn > 1.5  * depth_alt — DLT numerical bias when the camera
+    //     baseline is nearly parallel to the feature ray during fast translation
+    if (success_tri && success_refine) {
+      auto &anchorclone_alt = clones_cam.at((*it1)->anchor_cam_id).at((*it1)->anchor_clone_timestamp);
+      const Eigen::Matrix3d &R_GtoA_alt = anchorclone_alt.Rot();
+      const Eigen::Vector3d &p_AinG_alt = anchorclone_alt.pos();
+      double alt_anchor = p_AinG_alt(2); // camera altitude at anchor frame (global z)
+      double depth_gn = (*it1)->p_FinA(2);
+      if (alt_anchor > 30.0 && depth_gn > 0.0) {
+        // Unit bearing in anchor camera frame
+        Eigen::Vector3d b_A = (*it1)->p_FinA / (*it1)->p_FinA.norm();
+        // Bearing direction in global frame
+        Eigen::Vector3d ray_inG = R_GtoA_alt.transpose() * b_A;
+        // Only correct if ray actually points toward the ground (negative global z)
+        if (ray_inG(2) < -0.1) {
+          // Ground-intersection depth: depth at which the ray from the anchor hits z=0
+          // p_AinG(2) + depth_alt * ray_inG(2) = 0  =>  depth_alt = -p_AinG(2) / ray_inG(2)
+          double depth_alt = -p_AinG_alt(2) / ray_inG(2);
+          bool is_underestimate = depth_gn < 0.85 * depth_alt;
+          bool is_overestimate  = depth_gn > 1.15  * depth_alt;
+          if (is_underestimate || is_overestimate) {
+            PRINT_DEBUG("[ALT-DEPTH-FIX]: feat %zu | depth_gn=%.2fm -> depth_alt=%.2fm (alt=%.1fm, %s)\n",
+                        (*it1)->featid, depth_gn, depth_alt, alt_anchor,
+                        is_underestimate ? "under" : "over");
+            (*it1)->p_FinA = depth_alt * b_A;
+            (*it1)->p_FinG = R_GtoA_alt.transpose() * (*it1)->p_FinA + p_AinG_alt;
+            features_with_alt_fix.insert((*it1)->featid);
+          }
+        }
+      }
+    }
+
+    // ALTITUDE-FORCED INIT FALLBACK
+    // When DLT triangulation fails (high cond number) due to nearly-pure rotation with tiny
+    // translational baseline, and the UAV is at high altitude with a downward-facing camera,
+    // directly initialize feature depth via ground-ray intersection instead of discarding.
+    //
+    // Condition: alt > 30m AND max_base < 5% of depth_alt (degenerate baseline-to-depth ratio).
+    // At 40m altitude and max_base=1.4m: 1.4/40 = 3.5% < 5% → fires.
+    // During normal translation at 40m with max_base=8m: 8/40 = 20% → does NOT fire.
+    if (!success_tri || !success_refine) {
+      if (clones_cam.count((*it1)->anchor_cam_id) &&
+          clones_cam.at((*it1)->anchor_cam_id).count((*it1)->anchor_clone_timestamp)) {
+        auto &anchorclone_af = clones_cam.at((*it1)->anchor_cam_id).at((*it1)->anchor_clone_timestamp);
+        const Eigen::Matrix3d &R_GtoA_af = anchorclone_af.Rot();
+        const Eigen::Vector3d &p_AinG_af = anchorclone_af.pos();
+        double alt_af = p_AinG_af(2);
+        if (alt_af > 30.0) {
+          // Bearing from last observation at anchor frame
+          size_t idx_af = (*it1)->timestamps.at((*it1)->anchor_cam_id).size() - 1;
+          Eigen::Vector3d b_af;
+          b_af << (*it1)->uvs_norm.at((*it1)->anchor_cam_id).at(idx_af)(0),
+              (*it1)->uvs_norm.at((*it1)->anchor_cam_id).at(idx_af)(1), 1.0;
+          b_af = b_af / b_af.norm();
+          // Ray direction in global frame
+          Eigen::Vector3d ray_af = R_GtoA_af.transpose() * b_af;
+          // Only apply if ray points toward ground
+          if (ray_af(2) < -0.1) {
+            // Ground-intersection depth: p_AinG(2) + depth * ray(2) = 0
+            double depth_alt_af = -p_AinG_af(2) / ray_af(2);
+            // Compute max translational baseline across all observation clones
+            double max_base_af = 0.0;
+            for (const auto &pair : (*it1)->timestamps) {
+              if (clones_cam.count(pair.first)) {
+                for (const auto &ts : pair.second) {
+                  if (clones_cam.at(pair.first).count(ts)) {
+                    Eigen::Vector3d p_CiinA = R_GtoA_af * (clones_cam.at(pair.first).at(ts).pos() - p_AinG_af);
+                    max_base_af = std::max(max_base_af, p_CiinA.norm());
+                  }
+                }
+              }
+            }
+            // Apply only when geometry is degenerate (baseline < 5% of expected depth)
+            if (depth_alt_af > 1.0 && max_base_af > 0.0 && max_base_af < 0.05 * depth_alt_af) {
+              (*it1)->p_FinA = depth_alt_af * b_af;
+              (*it1)->p_FinG = R_GtoA_af.transpose() * (*it1)->p_FinA + p_AinG_af;
+              PRINT_DEBUG("[ALT-FORCED-INIT]: feat %zu | depth_alt=%.2fm | alt=%.1fm | max_base=%.3fm (%.1f%%)\n",
+                          (*it1)->featid, depth_alt_af, alt_af, max_base_af, 100.0 * max_base_af / depth_alt_af);
+              features_with_alt_fix.insert((*it1)->featid); // apply SLAM-DEPTH-PIN to tighten variance
+              success_tri = true;
+              success_refine = true;
+            }
+          }
+        }
+      }
+    }
+
+    features_p_FinG_original.insert({(*it1)->featid, (*it1)->p_FinG}); // TODO: handle anchored...
 
     // Remove the feature if not a success
     if (!success_tri || !success_refine) {
@@ -233,6 +330,38 @@ void UpdaterSLAM::delayed_init(std::shared_ptr<State> state, std::vector<std::sh
     if (StateHelper::initialize(state, landmark, Hx_order, H_x, H_f, R, res, chi2_multipler)) {
       state->_features_SLAM.insert({(*it2)->featid, landmark});
       (*it2)->to_delete = true;
+      PRINT_DEBUG("[SLAM-INIT-DEPTH]: feat %zu | depth=%.2fm | imu_alt=%.1fm\n",
+                  (*it2)->featid, (*it2)->p_FinA(2), state->_imu->pos()(2));
+      // Pin inverse depth with tight variance to prevent EKF from reverting ALT-DEPTH-FIX.
+      // ALT-DEPTH-FIX sets a geometrically correct depth, but the feature's covariance after
+      // initialize() is large (degenerate geometry), so EKF pulls depth back toward depth_gn
+      // within one frame. A pseudo-measurement with zero residual shrinks sigma_rho without
+      // shifting the mean, making subsequent Kalman gains near-zero.
+      if (features_with_alt_fix.count((*it2)->featid)) {
+        double z_A = (*it2)->p_FinA(2);
+        if (z_A > 1.0) {
+          double rho = 1.0 / z_A;
+          const double sigma_d = 5.0;              // desired depth uncertainty in meters
+          double sigma_rho = sigma_d * rho * rho;  // σ_ρ = σ_d / z² (linearized)
+          // H selects the inverse-depth component (always last in the landmark state)
+          Eigen::MatrixXd H_pin = Eigen::MatrixXd::Zero(1, landmark->size());
+          H_pin(0, landmark->size() - 1) = 1.0;
+          Eigen::VectorXd res_pin = Eigen::VectorXd::Zero(1);  // zero residual: mean unchanged
+          Eigen::MatrixXd R_pin = (sigma_rho * sigma_rho) * Eigen::MatrixXd::Identity(1, 1);
+          // Record P_ρρ before update to verify variance shrinkage
+          Eigen::MatrixXd P_lm_before = StateHelper::get_marginal_covariance(state, {landmark});
+          double P_rho_before = P_lm_before(landmark->size() - 1, landmark->size() - 1);
+          StateHelper::EKFUpdate(state, {landmark}, H_pin, res_pin, R_pin);
+          // Record P_ρρ after update
+          Eigen::MatrixXd P_lm_after = StateHelper::get_marginal_covariance(state, {landmark});
+          double P_rho_after = P_lm_after(landmark->size() - 1, landmark->size() - 1);
+          // Convert inverse-depth variance to depth-space sigma: σ_z = σ_ρ * z²
+          double sigma_z_before = std::sqrt(P_rho_before) * z_A * z_A;
+          double sigma_z_after = std::sqrt(P_rho_after) * z_A * z_A;
+          PRINT_DEBUG("[SLAM-DEPTH-PIN]: feat %zu | z_A=%.2fm | sigma_d=%.1fm | P_rho: %.3e->%.3e | sigma_z: %.2fm->%.2fm\n",
+                      (*it2)->featid, z_A, sigma_d, P_rho_before, P_rho_after, sigma_z_before, sigma_z_after);
+        }
+      }
       it2++;
     } else {
       (*it2)->to_delete = true;
@@ -243,10 +372,10 @@ void UpdaterSLAM::delayed_init(std::shared_ptr<State> state, std::vector<std::sh
 
   // Debug print timing information
   if (!feature_vec.empty()) {
-    PRINT_ALL("[SLAM-DELAY]: %.4f seconds to clean\n", (rT1 - rT0).total_microseconds() * 1e-6);
-    PRINT_ALL("[SLAM-DELAY]: %.4f seconds to triangulate\n", (rT2 - rT1).total_microseconds() * 1e-6);
-    PRINT_ALL("[SLAM-DELAY]: %.4f seconds initialize (%d features)\n", (rT3 - rT2).total_microseconds() * 1e-6, (int)feature_vec.size());
-    PRINT_ALL("[SLAM-DELAY]: %.4f seconds total\n", (rT3 - rT1).total_microseconds() * 1e-6);
+    PRINT_DEBUG("[SLAM-DELAY]: %.4f seconds to clean\n", (rT1 - rT0).total_microseconds() * 1e-6);
+    PRINT_DEBUG("[SLAM-DELAY]: %.4f seconds to triangulate\n", (rT2 - rT1).total_microseconds() * 1e-6);
+    PRINT_DEBUG("[SLAM-DELAY]: %.4f seconds initialize (%d features)\n", (rT3 - rT2).total_microseconds() * 1e-6, (int)feature_vec.size());
+    PRINT_DEBUG("[SLAM-DELAY]: %.4f seconds total\n", (rT3 - rT1).total_microseconds() * 1e-6);
   }
 }
 
@@ -347,6 +476,18 @@ void UpdaterSLAM::update(std::shared_ptr<State> state, std::vector<std::shared_p
       feat.anchor_clone_timestamp = landmark->_anchor_clone_timestamp;
       feat.p_FinA = landmark->get_xyz(false);
       feat.p_FinA_fej = landmark->get_xyz(true);
+      // Detect EKF-driven depth shrinkage in SLAM state
+      {
+        double alt_imu = state->_imu->pos()(2);
+        if (alt_imu > 20.0 && feat.p_FinA(2) > 0.0 && feat.p_FinA(2) < 0.4 * alt_imu) {
+          double z_A = feat.p_FinA(2);
+          Eigen::MatrixXd P_lm = StateHelper::get_marginal_covariance(state, {landmark});
+          double sigma_rho = std::sqrt(P_lm(landmark->size() - 1, landmark->size() - 1));
+          double sigma_z = sigma_rho * z_A * z_A;  // σ_z = σ_ρ * z² (linearized)
+          PRINT_DEBUG("[SLAM-DEPTH-SHRINK]: feat %zu | depth=%.2fm | imu_alt=%.1fm | sigma_z=%.2fm\n",
+                      feat.featid, z_A, alt_imu, sigma_z);
+        }
+      }
     } else {
       feat.p_FinG = landmark->get_xyz(false);
       feat.p_FinG_fej = landmark->get_xyz(true);
@@ -552,6 +693,15 @@ void UpdaterSLAM::perform_anchor_change(std::shared_ptr<State> state, std::share
   Eigen::Matrix<double, 3, 3> R_OLDtoNEW = R_GtoNEW * R_GtoOLD.transpose();
   Eigen::Matrix<double, 3, 1> p_OLDinNEW = R_GtoNEW * (p_OLDinG - p_NEWinG);
   new_feat.p_FinA = R_OLDtoNEW * landmark->get_xyz(false) + p_OLDinNEW;
+  // Log depth change during anchor transition
+  {
+    double d_before = old_feat.p_FinA(2);
+    double d_after = new_feat.p_FinA(2);
+    if (d_after < 30.0 || d_before < 30.0 || d_after < 0.5 * d_before) {
+      PRINT_DEBUG("[ANCHOR-CHANGE-DEPTH]: feat %zu | depth %.2fm -> %.2fm | old_alt=%.1fm | new_alt=%.1fm\n",
+                  landmark->_featid, d_before, d_after, p_OLDinG(2), p_NEWinG(2));
+    }
+  }
 
   //==========================================================================
   //==========================================================================

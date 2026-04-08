@@ -82,6 +82,10 @@ struct StateOptions {
   /// Number of distinct cameras that we will observe features in
   int num_cameras = 1;
 
+  bool use_altitude_constraint = true;
+
+  double sigma_altitude = 0.15;
+
   /// What representation our features are in (msckf features)
   ov_type::LandmarkRepresentation::Representation feat_rep_msckf = ov_type::LandmarkRepresentation::Representation::GLOBAL_3D;
 

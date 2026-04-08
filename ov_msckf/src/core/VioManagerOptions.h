@@ -470,6 +470,7 @@ struct VioManagerOptions {
       parser->parse_config("grid_x", grid_x);
       parser->parse_config("grid_y", grid_y);
       parser->parse_config("min_px_dist", min_px_dist);
+      parser->parse_config("use_homography_ransac", use_homography_ransac);
       std::string histogram_method_str = "HISTOGRAM";
       parser->parse_config("histogram_method", histogram_method_str);
       if (histogram_method_str == "NONE") {

@@ -35,12 +35,12 @@ zupt_noise_multiplier: 20
 zupt_max_disparity: 0.5 # set to 0 for only imu-based
 zupt_only_at_beginning: false
 
-up_homo_sigma_r: 0.05
-up_homo_pure_rotation_ratio: 0.85
-up_homo_min_parallax: 0.5
-up_homo_sigma_trans: 0.1
-up_homo_chi2_multipler: 25
-up_homo_camera_id: 0
+# Altitude constraint: use flight controller relative takeoff height to constrain p_IinG(z)
+# This prevents z-drift during pure rotation when VIO loses observability on translation.
+# The height is fed via /mavros/odometry/in (relative to first message = takeoff point).
+use_altitude_constraint: true
+sigma_altitude: 0.15 # measurement noise (meters); barometer ~0.1m, with IMU extrinsic offset allow 0.3m
+
 # ==================================================================
 # ==================================================================
 

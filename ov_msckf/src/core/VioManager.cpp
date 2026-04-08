@@ -42,6 +42,7 @@
 #include "update/UpdaterMSCKF.h"
 #include "update/UpdaterSLAM.h"
 #include "update/UpdaterZeroVelocity.h"
+#include "update/UpdaterPureYaw.h"
 
 using namespace ov_core;
 using namespace ov_type;
@@ -167,6 +168,9 @@ VioManager::VioManager(VioManagerOptions &params_) : thread_init_running(false),
                                                         propagator, params.gravity_mag, params.zupt_max_velocity,
                                                         params.zupt_noise_multiplier, params.zupt_max_disparity);
   }
+
+  // Always create the pure-yaw updater (activates only above _min_altitude during pure yaw)
+  updaterPureYaw = std::make_shared<UpdaterPureYaw>(params.imu_noises);
 }
 
 void VioManager::feed_measurement_imu(const ov_core::ImuData &message) {
@@ -194,6 +198,11 @@ void VioManager::feed_measurement_imu(const ov_core::ImuData &message) {
   // No need to push back if we are just doing the zv-update at the begining and we have moved
   if (is_initialized_vio && updaterZUPT != nullptr && (!params.zupt_only_at_beginning || !has_moved_since_zupt)) {
     updaterZUPT->feed_imu(message, oldest_time);
+  }
+
+  // Push back to the pure-yaw updater
+  if (is_initialized_vio && updaterPureYaw != nullptr) {
+    updaterPureYaw->feed_imu(message, oldest_time);
   }
 }
 
@@ -236,6 +245,16 @@ void VioManager::feed_measurement_simulation(double timestamp, const std::vector
       assert(state->_timestamp == timestamp);
       propagator->clean_old_imu_measurements(timestamp + state->_calib_dt_CAMtoIMU->value()(0) - 0.10);
       updaterZUPT->clean_old_imu_measurements(timestamp + state->_calib_dt_CAMtoIMU->value()(0) - 0.10);
+      propagator->invalidate_cache();
+      return;
+    }
+  }
+
+  // Check if we should do a pure-yaw update (simulation: no altitude available, pass 0.0)
+  if (is_initialized_vio && updaterPureYaw != nullptr && state->_timestamp != timestamp) {
+    if (updaterPureYaw->try_update(state, timestamp, 0.0)) {
+      propagator->clean_old_imu_measurements(timestamp + state->_calib_dt_CAMtoIMU->value()(0) - 0.10);
+      updaterPureYaw->clean_old_imu_measurements(timestamp + state->_calib_dt_CAMtoIMU->value()(0) - 0.10);
       propagator->invalidate_cache();
       return;
     }
@@ -314,6 +333,16 @@ void VioManager::track_image_and_update(const ov_core::CameraData &message_const
     }
   }
 
+  // Check if we should do a pure-yaw update (skips propagate_and_clone for this frame)
+  if (is_initialized_vio && updaterPureYaw != nullptr && state->_timestamp != message.timestamp) {
+    if (updaterPureYaw->try_update(state, message.timestamp, _cam_height.load())) {
+      propagator->clean_old_imu_measurements(message.timestamp + state->_calib_dt_CAMtoIMU->value()(0) - 0.10);
+      updaterPureYaw->clean_old_imu_measurements(message.timestamp + state->_calib_dt_CAMtoIMU->value()(0) - 0.10);
+      propagator->invalidate_cache();
+      return;
+    }
+  }
+
   // If we do not have VIO initialization, then try to initialize
   // TODO: Or if we are trying to reset the system, then do that here!
   if (!is_initialized_vio) {
@@ -367,6 +396,31 @@ void VioManager::do_feature_propagate_update(const ov_core::CameraData &message)
     return;
   }
   has_moved_since_zupt = true;
+
+  //===================================================================================
+  // Altitude (barometer / flight controller) constraint: 1-DOF EKF update on p_IinG(z)
+  //===================================================================================
+
+  // The flight controller publishes relative-to-takeoff height, stored in _cam_height.
+  // At initialization the drone is on/near the ground, so p_IinG(2) ≈ 0 at startup,
+  // making _cam_height a direct observation of p_IinG(2).
+  // Measurement model: z_meas = p_IinG(2), H = [0 0 1] w.r.t. _imu->p(), R = sigma_alt^2
+  double h = _cam_height.load();
+  // if (state->_options.use_altitude_constraint) {
+  //   if (h > 30.0) {
+  //     double sigma_alt = state->_options.sigma_altitude;
+  //     std::vector<std::shared_ptr<ov_type::Type>> Hx_order_alt;
+  //     Hx_order_alt.push_back(state->_imu->p());
+  //     Eigen::MatrixXd H_alt = Eigen::MatrixXd::Zero(1, 3);
+  //     H_alt(0, 2) = 1.0; // select z component
+  //     Eigen::VectorXd res_alt(1);
+  //     res_alt(0) = h - state->_imu->pos()(2);
+  //     Eigen::MatrixXd R_alt = Eigen::MatrixXd::Identity(1, 1) * sigma_alt * sigma_alt;
+  //     PRINT_DEBUG("[ALTITUDE]: h_meas=%.3f  p_z=%.3f  res=%.3f\n", h, state->_imu->pos()(2), res_alt(0));
+  //     StateHelper::EKFUpdate(state, Hx_order_alt, H_alt, res_alt, R_alt);
+  //   }
+  // }
+  PRINT_DEBUG("[ALTITUDE]: h_meas=%.3f  p_z=%.3f\n", h, state->_imu->pos()(2));
 
   //===================================================================================
   // MSCKF features and KLT tracks that are SLAM features

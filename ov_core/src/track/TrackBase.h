@@ -225,7 +225,7 @@ public:
   /// If true, use homography RANSAC instead of fundamental-matrix RANSAC
   /// for temporal outlier rejection.  Homography is well-defined under pure
   /// rotation (where F is degenerate) and gives dramatically better results.
-  bool use_homography_ransac_ = false;
+  bool use_homography_ransac_ = true;
 };
 
 } // namespace ov_core
