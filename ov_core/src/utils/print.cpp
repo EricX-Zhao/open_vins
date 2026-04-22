@@ -22,6 +22,7 @@
 #include "print.h"
 #include <cstdio>
 #include <cstdlib>
+#include "apexpilot_logger/logging.hpp"
 
 #ifdef __ANDROID__
 #include <android/log.h>
@@ -135,25 +136,54 @@ void Printer::debugPrint(PrintLevel level, const char location[], const char lin
   // Log to Android logcat
   __android_log_print(log_priority, LOG_TAG, "%s%s", location_str, formatted_msg);
 #else
-  // Use standard printf on non-Android platforms
-  // Print the location info first for our debug output
-  // Truncate the filename to the max size for the filepath
+  // Build caller location prefix for DEBUG-level logging
+  std::string caller_prefix;
   if (static_cast<int>(Printer::current_print_level) <= static_cast<int>(Printer::PrintLevel::DEBUG)) {
     std::string path(location);
     std::string base_filename = path.substr(path.find_last_of("/\\") + 1);
     if (base_filename.size() > MAX_FILE_PATH_LEGTH) {
-      printf("%s", base_filename.substr(base_filename.size() - MAX_FILE_PATH_LEGTH, base_filename.size()).c_str());
-    } else {
-      printf("%s", base_filename.c_str());
+      base_filename = base_filename.substr(base_filename.size() - MAX_FILE_PATH_LEGTH);
     }
-    printf(":%s ", line);
+    caller_prefix = base_filename + ":" + std::string(line);
   }
 
-  // Print the rest of the args
+  // Format the message into a string, then forward to apexpilot logger (file + stdout)
   va_list args;
   va_start(args, format);
-  vprintf(format, args);
+  va_list args_copy;
+  va_copy(args_copy, args);
+  int needed = std::vsnprintf(nullptr, 0, format, args_copy);
+  va_end(args_copy);
+  std::string msg;
+  if (needed > 0) {
+    msg.resize(needed + 1);
+    std::vsnprintf(&msg[0], msg.size(), format, args);
+    msg.resize(needed);
+    // Strip trailing newline — spdlog appends its own
+    if (!msg.empty() && msg.back() == '\n') {
+      msg.pop_back();
+    }
+  }
   va_end(args);
+
+  static std::shared_ptr<spdlog::logger> logger = apexpilot::get_logger("openvins");
+
+  switch (level) {
+  case PrintLevel::ALL:
+  case PrintLevel::DEBUG:
+    logger->debug("[{}]{}", caller_prefix, msg);
+    break;
+  case PrintLevel::INFO:
+    logger->info("[{}]{}", caller_prefix, msg);
+    break;
+  case PrintLevel::WARNING:
+    logger->warn("[{}]{}", caller_prefix, msg);
+    break;
+  case PrintLevel::ERROR:
+  default:
+    logger->error("[{}]{}", caller_prefix, msg);
+    break;
+  }
 #endif
 }
 

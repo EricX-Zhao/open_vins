@@ -55,6 +55,7 @@ bool FeatureInitializer::single_triangulation(std::shared_ptr<Feature> feat,
   const Eigen::Matrix<double, 3, 1> &p_AinG = anchorclone.pos();
 
   // Loop through each camera for this feature
+  double max_trans_base = 0.0;
   for (auto const &pair : feat->timestamps) {
 
     // Add CAM_I features
@@ -81,6 +82,7 @@ bool FeatureInitializer::single_triangulation(std::shared_ptr<Feature> feat,
       Eigen::Matrix3d Ai = Bperp.transpose() * Bperp;
       A += Ai;
       b += Ai * p_CiinA;
+      max_trans_base = std::max(max_trans_base, p_CiinA.norm());
     }
   }
 
@@ -94,9 +96,8 @@ bool FeatureInitializer::single_triangulation(std::shared_ptr<Feature> feat,
   singularValues = svd.singularValues();
   double condA = singularValues(0, 0) / singularValues(singularValues.rows() - 1, 0);
 
-  // std::stringstream ss;
-  // ss << feat->featid << " - cond " << std::abs(condA) << " - z " << p_f(2, 0) << std::endl;
-  // PRINT_DEBUG(ss.str().c_str());
+  PRINT_DEBUG("[FEAT-DEPTH]: feat %zu | n=%d | cond=%.1f | depth_dlt=%.3fm | max_base=%.4fm\n", feat->featid, total_meas,
+              std::abs(condA), p_f(2, 0), max_trans_base);
 
   // If we have a bad condition number, or it is too close
   // Then set the flag for bad (i.e. set z-axis to nan)
@@ -198,6 +199,7 @@ bool FeatureInitializer::single_gaussnewton(std::shared_ptr<Feature> feat,
                                             std::unordered_map<size_t, std::unordered_map<double, ClonePose>> &clonesCAM) {
 
   // Get into inverse depth
+  double depth_init = feat->p_FinA(2);
   double rho = 1 / feat->p_FinA(2);
   double alpha = feat->p_FinA(0) / feat->p_FinA(2);
   double beta = feat->p_FinA(1) / feat->p_FinA(2);
@@ -356,9 +358,8 @@ bool FeatureInitializer::single_gaussnewton(std::shared_ptr<Feature> feat,
         base_line_max = base_line;
     }
   }
-  // std::stringstream ss;
-  // ss << feat->featid << " - max base " << (feat->p_FinA.norm() / base_line_max) << " - z " << feat->p_FinA(2) << std::endl;
-  // PRINT_DEBUG(ss.str().c_str());
+  PRINT_DEBUG("[FEAT-DEPTH-GN]: feat %zu | depth_dlt=%.3fm -> depth_gn=%.3fm | max_base=%.4fm | base_ratio=%.1f\n", feat->featid,
+              depth_init, feat->p_FinA(2), base_line_max, feat->p_FinA.norm() / base_line_max);
 
   // Check if this feature is bad or not
   // 1. If the feature is too close

@@ -211,8 +211,8 @@ int main(int argc, char **argv) {
       ate_2d_dataset_pos.calculate();
 
       // Print stats for this specific dataset
-      std::string prefix = (ate_dataset_ori.mean > 10 || ate_dataset_pos.mean > 10) ? RED : "";
-      PRINT_DEBUG("%s\tATE: mean_ori = %.3f | mean_pos = %.3f (%d runs)\n" RESET, prefix.c_str(), ate_dataset_ori.mean,
+      // std::string prefix = (ate_dataset_ori.mean > 10 || ate_dataset_pos.mean > 10) ? RED : "";
+      PRINT_DEBUG("ATE: mean_ori = %.3f | mean_pos = %.3f (%d runs)\n" RESET, ate_dataset_ori.mean,
                   ate_dataset_pos.mean, (int)ate_dataset_pos.values.size());
       PRINT_DEBUG("\tATE: std_ori  = %.3f | std_pos  = %.3f\n", ate_dataset_ori.std, ate_dataset_pos.std);
       PRINT_DEBUG("\tATE 2D: mean_ori = %.3f | mean_pos = %.3f (%d runs)\n", ate_2d_dataset_ori.mean, ate_2d_dataset_pos.mean,

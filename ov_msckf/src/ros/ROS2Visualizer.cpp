@@ -216,6 +216,29 @@ void ROS2Visualizer::setup_subscribers(std::shared_ptr<ov_core::YamlParser> pars
       PRINT_INFO("subscribing to cam (mono): %s\n", cam_topic.c_str());
     }
   }
+
+  std::string fcs_odom_topic = "/mavros/odometry/in";
+  fcs_odom_sub_ = _node->create_subscription<nav_msgs::msg::Odometry>(
+    fcs_odom_topic, 5,
+    [&] ( const nav_msgs::msg::Odometry::ConstSharedPtr& odom_msg) {
+      if (is_first_odom_) {
+        fcs_init_height_ = static_cast<float>(odom_msg->pose.pose.position.z);
+        is_first_odom_ = false;
+        return;
+      }
+      auto odom_height = static_cast<float>(odom_msg->pose.pose.position.z) - fcs_init_height_;
+      fcs_odom_height_.store(odom_height);
+      _app->feed_measurement_height(rclcpp::Time(odom_msg->header.stamp).seconds(), odom_height);
+
+      // std::lock_guard<std::mutex> lock(odom_buffer_mutex_);
+      // odom_buffer_.insert({rclcpp::Time(odom_msg->header.stamp).nanoseconds(), *odom_msg});
+      // if (odom_buffer_.size() > 100) {
+      //   odom_buffer_.erase(odom_buffer_.begin());
+      // }
+      // PRINT_DEBUG("[FCS_ODOM]: velocity: [%.2f, %.2f, %.2f]\n", 
+      //     odom_msg->twist.twist.linear.x, odom_msg->twist.twist.linear.y, odom_msg->twist.twist.linear.z);
+      
+  });
 }
 
 void ROS2Visualizer::visualize() {
