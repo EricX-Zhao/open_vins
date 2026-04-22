@@ -126,10 +126,3 @@ use_mask: false
 relative_config_imu: "kalibr_imu_chain.yaml"
 relative_config_imucam: "kalibr_imucam_chain.yaml"
 
-use_plane_height: true
-use_homography: true
-sigma_plane_height: 0.5
-sigma_homo_rot: 0.02
-sigma_homo_trans_rel: 0.05
-plane_h_offset: 0.3
-plane_min_altitude: 30.0
