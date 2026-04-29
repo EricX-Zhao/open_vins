@@ -8,9 +8,9 @@ integration: "rk4" # discrete, rk4, analytical (if rk4 or analytical used then a
 use_stereo: false # if we have more than 1 camera, if we should try to track stereo constraints between pairs
 max_cameras: 1 # how many cameras we have 1 = mono, 2 = stereo, >2 = binocular (all mono tracking)
 
-calib_cam_extrinsics: false
+calib_cam_extrinsics: true
 calib_cam_intrinsics: false
-calib_cam_timeoffset: false
+calib_cam_timeoffset: true
 calib_imu_intrinsics: false
 calib_imu_g_sensitivity: false
 
@@ -104,9 +104,10 @@ downsize_aruco: true
 # feature initialization parameters
 fi_triangulate_1d: false
 fi_min_dist: 0.1
-fi_max_dist: 300.0
+fi_max_dist: 500.0
 # fi_max_baseline: 500
 fi_max_cond_number: 15000
+fi_refine_features: false
 # ==================================================================
 # ==================================================================
 
