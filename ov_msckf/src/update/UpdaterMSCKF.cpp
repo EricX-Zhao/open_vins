@@ -55,7 +55,8 @@ UpdaterMSCKF::UpdaterMSCKF(UpdaterOptions &options, ov_core::FeatureInitializerO
   }
 }
 
-void UpdaterMSCKF::update(std::shared_ptr<State> state, std::vector<std::shared_ptr<Feature>> &feature_vec) {
+void UpdaterMSCKF::update(std::shared_ptr<State> state, std::vector<std::shared_ptr<Feature>> &feature_vec,
+                          std::vector<std::shared_ptr<Feature>> *rejected_out) {
 
   // Return if no features
   if (feature_vec.empty())
@@ -134,6 +135,8 @@ void UpdaterMSCKF::update(std::shared_ptr<State> state, std::vector<std::shared_
 
     // Remove the feature if not a success
     if (!success_tri || !success_refine) {
+      if (rejected_out)
+        rejected_out->push_back(*it1); // triangulation failed — candidate for plane recovery
       (*it1)->to_delete = true;
       it1 = feature_vec.erase(it1);
       continue;

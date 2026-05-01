@@ -73,8 +73,10 @@ public:
    * @brief Given max track features, this will try to use them to initialize them in the state.
    * @param state State of the filter
    * @param feature_vec Features that can be used for update
+   * @param rejected_out If non-null, triangulation-failed features are appended here (for v3.1 plane recovery)
    */
-  void delayed_init(std::shared_ptr<State> state, std::vector<std::shared_ptr<ov_core::Feature>> &feature_vec);
+  void delayed_init(std::shared_ptr<State> state, std::vector<std::shared_ptr<ov_core::Feature>> &feature_vec,
+                    std::vector<std::shared_ptr<ov_core::Feature>> *rejected_out = nullptr);
 
   /**
    * @brief Will change SLAM feature anchors if it will be marginalized

@@ -64,8 +64,10 @@ public:
    *
    * @param state State of the filter
    * @param feature_vec Features that can be used for update
+   * @param rejected_out If non-null, triangulation-failed features are appended here (for v3.1 plane recovery)
    */
-  void update(std::shared_ptr<State> state, std::vector<std::shared_ptr<ov_core::Feature>> &feature_vec);
+  void update(std::shared_ptr<State> state, std::vector<std::shared_ptr<ov_core::Feature>> &feature_vec,
+              std::vector<std::shared_ptr<ov_core::Feature>> *rejected_out = nullptr);
 
 protected:
   /// Options used during update

@@ -21,7 +21,12 @@
 
 #include "ROS2Visualizer.h"
 
+#include <visualization_msgs/msg/marker.hpp>
+#include <visualization_msgs/msg/marker_array.hpp>
+
 #include "core/VioManager.h"
+#include "update/UpdaterGroundPlane.h"
+#include "feat/FeatureDatabase.h"
 #include "ros/ROSVisualizerHelper.h"
 #include "sim/Simulator.h"
 #include "state/Propagator.h"
@@ -61,6 +66,12 @@ ROS2Visualizer::ROS2Visualizer(std::shared_ptr<rclcpp::Node> node, std::shared_p
   PRINT_DEBUG("Publishing: %s\n", pub_points_aruco->get_topic_name());
   pub_points_sim = node->create_publisher<sensor_msgs::msg::PointCloud2>("points_sim", 2);
   PRINT_DEBUG("Publishing: %s\n", pub_points_sim->get_topic_name());
+  pub_points_planar = node->create_publisher<sensor_msgs::msg::PointCloud2>("points_planar", 2);
+  PRINT_DEBUG("Publishing: %s\n", pub_points_planar->get_topic_name());
+  pub_points_homography = node->create_publisher<sensor_msgs::msg::PointCloud2>("points_homography", 2);
+  PRINT_DEBUG("Publishing: %s\n", pub_points_homography->get_topic_name());
+  pub_plane_marker = node->create_publisher<visualization_msgs::msg::MarkerArray>("ground_plane", 2);
+  PRINT_DEBUG("Publishing: %s\n", pub_plane_marker->get_topic_name());
 
   // Our tracking image
   it_pub_tracks = it.advertise("trackhist", 2);
@@ -271,6 +282,12 @@ void ROS2Visualizer::visualize() {
 
   // publish points
   publish_features();
+
+  // Publish ground-plane visualization
+  publish_ground_plane();
+
+  // Homography-based ground plane point cloud validation
+  publish_homography_plane_cloud();
 
   // Publish gt if we have it
   publish_groundtruth();
@@ -716,6 +733,13 @@ void ROS2Visualizer::publish_features() {
   sensor_msgs::msg::PointCloud2 cloud_ARUCO = ROSVisualizerHelper::get_ros_pointcloud(_node, feats_aruco);
   pub_points_aruco->publish(cloud_ARUCO);
 
+  // Planar SLAM features
+  if (pub_points_planar->get_subscription_count() != 0) {
+    std::vector<Eigen::Vector3d> feats_planar = _app->get_features_planar();
+    sensor_msgs::msg::PointCloud2 cloud_planar = ROSVisualizerHelper::get_ros_pointcloud(_node, feats_planar);
+    pub_points_planar->publish(cloud_planar);
+  }
+
   // Skip the rest of we are not doing simulation
   if (_sim == nullptr)
     return;
@@ -724,6 +748,185 @@ void ROS2Visualizer::publish_features() {
   std::vector<Eigen::Vector3d> feats_sim = _sim->get_map_vec();
   sensor_msgs::msg::PointCloud2 cloud_SIM = ROSVisualizerHelper::get_ros_pointcloud(_node, feats_sim);
   pub_points_sim->publish(cloud_SIM);
+}
+
+void ROS2Visualizer::publish_ground_plane() {
+
+  if (pub_plane_marker->get_subscription_count() == 0 && pub_points_planar->get_subscription_count() == 0)
+    return;
+
+  if (!_app->get_state())
+    return;
+
+  // Get ground-plane updater from VioManager
+  auto gp = _app->get_ground_plane_updater();
+  if (!gp || !gp->is_plane_initialized())
+    return;
+
+  Eigen::Vector3d cp = gp->get_cp();
+  double d = cp.norm();
+  if (d < 1e-6)
+    return;
+
+  Eigen::Vector3d n = cp / d; // plane normal (pointing from origin toward plane)
+
+  // ---- Build two orthogonal tangent vectors in the plane ----
+  Eigen::Vector3d t;
+  if (std::abs(n.x()) < 0.9)
+    t = n.cross(Eigen::Vector3d::UnitX()).normalized();
+  else
+    t = n.cross(Eigen::Vector3d::UnitY()).normalized();
+  Eigen::Vector3d b = n.cross(t).normalized(); // bitangent
+
+  const double half = 3.0; // half-size of the displayed patch [m]
+
+  // Four corners of the square patch centred at cp
+  Eigen::Vector3d A = cp + half * t + half * b;
+  Eigen::Vector3d B = cp + half * t - half * b;
+  Eigen::Vector3d C = cp - half * t - half * b;
+  Eigen::Vector3d D = cp - half * t + half * b;
+
+  auto make_point = [](const Eigen::Vector3d &p) {
+    geometry_msgs::msg::Point pt;
+    pt.x = p.x();
+    pt.y = p.y();
+    pt.z = p.z();
+    return pt;
+  };
+
+  auto ts = ROSVisualizerHelper::get_time_from_seconds(_app->get_state()->_timestamp);
+
+  visualization_msgs::msg::MarkerArray arr;
+
+  // ---- Marker 0: semi-transparent plane patch (TRIANGLE_LIST) ----
+  {
+    visualization_msgs::msg::Marker m;
+    m.header.stamp = ts;
+    m.header.frame_id = "global";
+    m.ns = "ground_plane";
+    m.id = 0;
+    m.type = visualization_msgs::msg::Marker::TRIANGLE_LIST;
+    m.action = visualization_msgs::msg::Marker::ADD;
+    m.scale.x = 1.0;
+    m.scale.y = 1.0;
+    m.scale.z = 1.0;
+    m.color.r = 0.0f;
+    m.color.g = 0.8f;
+    m.color.b = 0.2f;
+    m.color.a = 0.35f;
+    m.pose.orientation.w = 1.0;
+
+    // Triangle 1: A-B-C
+    m.points.push_back(make_point(A));
+    m.points.push_back(make_point(B));
+    m.points.push_back(make_point(C));
+    // Triangle 2: A-C-D
+    m.points.push_back(make_point(A));
+    m.points.push_back(make_point(C));
+    m.points.push_back(make_point(D));
+    // Back-face triangles so it's visible from both sides
+    m.points.push_back(make_point(C));
+    m.points.push_back(make_point(B));
+    m.points.push_back(make_point(A));
+    m.points.push_back(make_point(D));
+    m.points.push_back(make_point(C));
+    m.points.push_back(make_point(A));
+
+    arr.markers.push_back(m);
+  }
+
+  // ---- Marker 1: normal arrow from CP toward origin ----
+  {
+    visualization_msgs::msg::Marker m;
+    m.header.stamp = ts;
+    m.header.frame_id = "global";
+    m.ns = "ground_plane";
+    m.id = 1;
+    m.type = visualization_msgs::msg::Marker::ARROW;
+    m.action = visualization_msgs::msg::Marker::ADD;
+    m.scale.x = 0.05;  // shaft diameter
+    m.scale.y = 0.10;  // head diameter
+    m.scale.z = 0.15;  // head length
+    m.color.r = 1.0f;
+    m.color.g = 0.5f;
+    m.color.b = 0.0f;
+    m.color.a = 0.9f;
+    m.pose.orientation.w = 1.0;
+
+    // Arrow from cp tip, pointing in normal direction (length = 0.5 m)
+    m.points.push_back(make_point(cp));
+    m.points.push_back(make_point(cp + 0.5 * n));
+
+    arr.markers.push_back(m);
+  }
+
+  // ---- Marker 2: sphere at the CP (closest point on plane) ----
+  {
+    visualization_msgs::msg::Marker m;
+    m.header.stamp = ts;
+    m.header.frame_id = "global";
+    m.ns = "ground_plane";
+    m.id = 2;
+    m.type = visualization_msgs::msg::Marker::SPHERE;
+    m.action = visualization_msgs::msg::Marker::ADD;
+    m.pose.position.x = cp.x();
+    m.pose.position.y = cp.y();
+    m.pose.position.z = cp.z();
+    m.pose.orientation.w = 1.0;
+    m.scale.x = 0.12;
+    m.scale.y = 0.12;
+    m.scale.z = 0.12;
+    m.color.r = 1.0f;
+    m.color.g = 1.0f;
+    m.color.b = 0.0f;
+    m.color.a = 1.0f;
+
+    arr.markers.push_back(m);
+  }
+
+  // ---- Marker 3: TEXT showing plane distance ----
+  {
+    visualization_msgs::msg::Marker m;
+    m.header.stamp = ts;
+    m.header.frame_id = "global";
+    m.ns = "ground_plane";
+    m.id = 3;
+    m.type = visualization_msgs::msg::Marker::TEXT_VIEW_FACING;
+    m.action = visualization_msgs::msg::Marker::ADD;
+    m.pose.position.x = cp.x();
+    m.pose.position.y = cp.y();
+    m.pose.position.z = cp.z() + 0.3;
+    m.pose.orientation.w = 1.0;
+    m.scale.z = 0.15; // text height
+    m.color.r = 1.0f;
+    m.color.g = 1.0f;
+    m.color.b = 1.0f;
+    m.color.a = 1.0f;
+
+    char buf[64];
+    snprintf(buf, sizeof(buf), "GP d=%.2fm n=[%.2f,%.2f,%.2f]", d, n.x(), n.y(), n.z());
+    m.text = std::string(buf);
+
+    arr.markers.push_back(m);
+  }
+
+  pub_plane_marker->publish(arr);
+}
+
+void ROS2Visualizer::publish_homography_plane_cloud() {
+  if (pub_points_homography->get_subscription_count() == 0)
+    return;
+
+  auto gp = _app->get_ground_plane_updater();
+  if (!gp)
+    return;
+
+  const auto &cloud = gp->get_homography_plane_points();
+  if (cloud.empty())
+    return;
+
+  sensor_msgs::msg::PointCloud2 pc_msg = ROSVisualizerHelper::get_ros_pointcloud(_node, cloud);
+  pub_points_homography->publish(pc_msg);
 }
 
 void ROS2Visualizer::publish_groundtruth() {

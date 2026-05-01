@@ -63,6 +63,17 @@ public:
   /// Number of times the update has failed for this feature (we should remove if it fails a couple times!)
   int update_fail_count = 0;
 
+  // ---- Ground-plane association fields (Method C) ----
+
+  /// True if this landmark is associated with the ground plane
+  bool is_planar = false;
+
+  /// Plane covariance index used at association time (identifies which PlaneCP this belongs to)
+  int plane_id = -1;
+
+  /// Consecutive frames where individual point-on-plane chi2 test failed (used for de-association)
+  int planar_chi2_fail_count = 0;
+
   /// First normalized uv coordinate bearing of this measurement (used for single depth representation)
   Eigen::Vector3d uv_norm_zero;
 

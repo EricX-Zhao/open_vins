@@ -25,6 +25,8 @@
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
 #include <geometry_msgs/msg/transform_stamped.hpp>
+#include <visualization_msgs/msg/marker.hpp>
+#include <visualization_msgs/msg/marker_array.hpp>
 #include <image_transport/image_transport.hpp>
 #include <message_filters/subscriber.h>
 #include <message_filters/sync_policies/approximate_time.h>
@@ -132,6 +134,12 @@ protected:
   /// Publish groundtruth (if we have it)
   void publish_groundtruth();
 
+  /// Publish ground-plane visualization (plane patch, normal arrow, planar features)
+  void publish_ground_plane();
+
+  /// Homography RANSAC on tracked 2D features + FC height → 3D point cloud
+  void publish_homography_plane_cloud();
+
   /// Publish loop-closure information of current pose and active track information
   void publish_loopclosure_information();
 
@@ -150,6 +158,9 @@ protected:
   rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pub_odomimu;
   rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pub_pathimu;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_points_msckf, pub_points_slam, pub_points_aruco, pub_points_sim;
+  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_points_planar;
+  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_points_homography;
+  rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr pub_plane_marker;
   rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pub_loop_pose, pub_loop_extrinsic;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud>::SharedPtr pub_loop_point;
   rclcpp::Publisher<sensor_msgs::msg::CameraInfo>::SharedPtr pub_loop_intrinsics;

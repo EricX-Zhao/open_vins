@@ -9,6 +9,7 @@ find_package(std_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
+find_package(visualization_msgs REQUIRED)
 find_package(cv_bridge REQUIRED)
 find_package(image_transport REQUIRED)
 find_package(ov_core REQUIRED)
@@ -44,6 +45,7 @@ list(APPEND ament_libraries
         geometry_msgs
         sensor_msgs
         nav_msgs
+        visualization_msgs
         cv_bridge
         image_transport
         ov_core
@@ -66,6 +68,7 @@ list(APPEND LIBRARY_SOURCES
         src/update/UpdaterMSCKF.cpp
         src/update/UpdaterSLAM.cpp
         src/update/UpdaterZeroVelocity.cpp
+        src/update/UpdaterGroundPlane.cpp
 )
 list(APPEND LIBRARY_SOURCES src/ros/ROS2Visualizer.cpp src/ros/ROSVisualizerHelper.cpp)
 file(GLOB_RECURSE LIBRARY_HEADERS "src/*.h")

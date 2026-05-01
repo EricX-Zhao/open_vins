@@ -58,7 +58,8 @@ UpdaterSLAM::UpdaterSLAM(UpdaterOptions &options_slam, UpdaterOptions &options_a
   }
 }
 
-void UpdaterSLAM::delayed_init(std::shared_ptr<State> state, std::vector<std::shared_ptr<Feature>> &feature_vec) {
+void UpdaterSLAM::delayed_init(std::shared_ptr<State> state, std::vector<std::shared_ptr<Feature>> &feature_vec,
+                               std::vector<std::shared_ptr<Feature>> *rejected_out) {
 
   // Return if no features
   if (feature_vec.empty())
@@ -137,6 +138,8 @@ void UpdaterSLAM::delayed_init(std::shared_ptr<State> state, std::vector<std::sh
 
     // Remove the feature if not a success
     if (!success_tri || !success_refine) {
+      if (rejected_out)
+        rejected_out->push_back(*it1); // triangulation failed — candidate for plane recovery
       (*it1)->to_delete = true;
       it1 = feature_vec.erase(it1);
       continue;
@@ -243,10 +246,10 @@ void UpdaterSLAM::delayed_init(std::shared_ptr<State> state, std::vector<std::sh
 
   // Debug print timing information
   if (!feature_vec.empty()) {
-    PRINT_ALL("[SLAM-DELAY]: %.4f seconds to clean\n", (rT1 - rT0).total_microseconds() * 1e-6);
-    PRINT_ALL("[SLAM-DELAY]: %.4f seconds to triangulate\n", (rT2 - rT1).total_microseconds() * 1e-6);
-    PRINT_ALL("[SLAM-DELAY]: %.4f seconds initialize (%d features)\n", (rT3 - rT2).total_microseconds() * 1e-6, (int)feature_vec.size());
-    PRINT_ALL("[SLAM-DELAY]: %.4f seconds total\n", (rT3 - rT1).total_microseconds() * 1e-6);
+    PRINT_INFO("[SLAM-DELAY]: %.4f seconds to clean\n", (rT1 - rT0).total_microseconds() * 1e-6);
+    PRINT_INFO("[SLAM-DELAY]: %.4f seconds to triangulate\n", (rT2 - rT1).total_microseconds() * 1e-6);
+    PRINT_INFO("[SLAM-DELAY]: %.4f seconds initialize (%d features)\n", (rT3 - rT2).total_microseconds() * 1e-6, (int)feature_vec.size());
+    PRINT_INFO("[SLAM-DELAY]: %.4f seconds total\n", (rT3 - rT1).total_microseconds() * 1e-6);
   }
 }
 

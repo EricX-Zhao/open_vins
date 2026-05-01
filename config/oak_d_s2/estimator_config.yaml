@@ -106,7 +106,7 @@ fi_triangulate_1d: false
 fi_min_dist: 0.1
 fi_max_dist: 500.0
 # fi_max_baseline: 500
-fi_max_cond_number: 15000
+fi_max_cond_number: 5000
 fi_refine_features: false
 # ==================================================================
 # ==================================================================

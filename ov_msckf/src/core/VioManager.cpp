@@ -42,6 +42,7 @@
 #include "update/UpdaterMSCKF.h"
 #include "update/UpdaterSLAM.h"
 #include "update/UpdaterZeroVelocity.h"
+#include "update/UpdaterGroundPlane.h"
 
 using namespace ov_core;
 using namespace ov_type;
@@ -155,11 +156,20 @@ VioManager::VioManager(VioManagerOptions &params_) : thread_init_running(false),
   updaterMSCKF = std::make_shared<UpdaterMSCKF>(params.msckf_options, params.featinit_options);
   updaterSLAM = std::make_shared<UpdaterSLAM>(params.slam_options, params.aruco_options, params.featinit_options);
 
+  // Ground-plane updater (Method C) — always created; individual features controlled by Options flags
+  updaterGroundPlane = std::make_shared<UpdaterGroundPlane>(UpdaterGroundPlane::Options{});
+
   // If we are using zero velocity updates, then create the updater
   if (params.try_zupt) {
     updaterZUPT = std::make_shared<UpdaterZeroVelocity>(params.zupt_options, params.imu_noises, trackFEATS->get_feature_database(),
                                                         propagator, params.gravity_mag, params.zupt_max_velocity,
                                                         params.zupt_noise_multiplier, params.zupt_max_disparity);
+  }
+}
+
+void VioManager::feed_measurement_height(double timestamp, double h_rel) {
+  if (updaterGroundPlane) {
+    updaterGroundPlane->feed_height(timestamp, h_rel);
   }
 }
 
@@ -359,6 +369,11 @@ void VioManager::do_feature_propagate_update(const ov_core::CameraData &message)
   }
   has_moved_since_zupt = true;
 
+  // Height update — runs immediately after propagation, before any feature updates
+  if (updaterGroundPlane) {
+    updaterGroundPlane->try_height_update(state, message.timestamp);
+  }
+
   //===================================================================================
   // MSCKF features and KLT tracks that are SLAM features
   //===================================================================================
@@ -522,7 +537,8 @@ void VioManager::do_feature_propagate_update(const ov_core::CameraData &message)
   // NOTE: this should only really be used if you want to track a lot of features, or have limited computational resources
   if ((int)featsup_MSCKF.size() > state->_options.max_msckf_in_update)
     featsup_MSCKF.erase(featsup_MSCKF.begin(), featsup_MSCKF.end() - state->_options.max_msckf_in_update);
-  updaterMSCKF->update(state, featsup_MSCKF);
+  std::vector<std::shared_ptr<Feature>> leftovers; // triangulation failures → v3.1 plane recovery
+  updaterMSCKF->update(state, featsup_MSCKF, &leftovers);
   propagator->invalidate_cache();
   rT4 = boost::posix_time::microsec_clock::local_time();
 
@@ -544,8 +560,13 @@ void VioManager::do_feature_propagate_update(const ov_core::CameraData &message)
   }
   feats_slam_UPDATE = feats_slam_UPDATE_TEMP;
   rT5 = boost::posix_time::microsec_clock::local_time();
-  updaterSLAM->delayed_init(state, feats_slam_DELAYED);
+  updaterSLAM->delayed_init(state, feats_slam_DELAYED, &leftovers);
   rT6 = boost::posix_time::microsec_clock::local_time();
+
+  // Ground-plane homography update runs after delayed_init so new SLAM features are already in the state.
+  if (updaterGroundPlane) {
+    updaterGroundPlane->apply_homography_plane_update(state, message.timestamp, leftovers);
+  }
 
   //===================================================================================
   // Update our visualization feature set, and clean up the old features

@@ -437,6 +437,25 @@ std::vector<Eigen::Vector3d> VioManager::get_features_SLAM() {
   return slam_feats;
 }
 
+std::vector<Eigen::Vector3d> VioManager::get_features_planar() {
+  std::vector<Eigen::Vector3d> planar_feats;
+  for (auto &f : state->_features_SLAM) {
+    if (!f.second->is_planar)
+      continue;
+    if (ov_type::LandmarkRepresentation::is_relative_representation(f.second->_feat_representation)) {
+      assert(f.second->_anchor_cam_id != -1);
+      Eigen::Matrix<double, 3, 3> R_ItoC = state->_calib_IMUtoCAM.at(f.second->_anchor_cam_id)->Rot();
+      Eigen::Matrix<double, 3, 1> p_IinC = state->_calib_IMUtoCAM.at(f.second->_anchor_cam_id)->pos();
+      Eigen::Matrix<double, 3, 3> R_GtoI = state->_clones_IMU.at(f.second->_anchor_clone_timestamp)->Rot();
+      Eigen::Matrix<double, 3, 1> p_IinG = state->_clones_IMU.at(f.second->_anchor_clone_timestamp)->pos();
+      planar_feats.push_back(R_GtoI.transpose() * R_ItoC.transpose() * (f.second->get_xyz(false) - p_IinC) + p_IinG);
+    } else {
+      planar_feats.push_back(f.second->get_xyz(false));
+    }
+  }
+  return planar_feats;
+}
+
 std::vector<Eigen::Vector3d> VioManager::get_features_ARUCO() {
   std::vector<Eigen::Vector3d> aruco_feats;
   for (auto &f : state->_features_SLAM) {

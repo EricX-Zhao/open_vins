@@ -50,6 +50,7 @@ class StateHelper;
 class UpdaterMSCKF;
 class UpdaterSLAM;
 class UpdaterZeroVelocity;
+class UpdaterGroundPlane;
 class Propagator;
 
 /**
@@ -81,6 +82,17 @@ public:
   void feed_measurement_camera(const ov_core::CameraData &message) { track_image_and_update(message); }
 
   /**
+   * @brief Feed a barometric / flight-controller relative height measurement.
+   *
+   * This is forwarded to UpdaterGroundPlane (Method C).  Call this whenever a
+   * new height measurement arrives (e.g. from a ROS topic or serial port).
+   *
+   * @param timestamp Sensor timestamp [s], in the same clock as camera/IMU
+   * @param h_rel     Height above the takeoff point [m]
+   */
+  void feed_measurement_height(double timestamp, double h_rel);
+
+  /**
    * @brief Feed function for a synchronized simulated cameras
    * @param timestamp Time that this image was collected
    * @param camids Camera ids that we have simulated measurements for
@@ -110,11 +122,20 @@ public:
   /// Accessor to get the current propagator
   std::shared_ptr<Propagator> get_propagator() { return propagator; }
 
+  /// Accessor to get the ground-plane updater (may be nullptr if disabled)
+  std::shared_ptr<UpdaterGroundPlane> get_ground_plane_updater() { return updaterGroundPlane; }
+
+  /// Accessor for the KLT feature tracker (gives access to feature database)
+  std::shared_ptr<ov_core::TrackBase> get_track_feats() { return trackFEATS; }
+
   /// Get a nice visualization image of what tracks we have
   cv::Mat get_historical_viz_image();
 
   /// Returns 3d SLAM features in the global frame
   std::vector<Eigen::Vector3d> get_features_SLAM();
+
+  /// Returns 3d SLAM features that are associated with the ground plane
+  std::vector<Eigen::Vector3d> get_features_planar();
 
   /// Returns 3d ARUCO features in the global frame
   std::vector<Eigen::Vector3d> get_features_ARUCO();
@@ -205,6 +226,9 @@ protected:
 
   /// Our zero velocity tracker
   std::shared_ptr<UpdaterZeroVelocity> updaterZUPT;
+
+  /// Ground-plane updater (Method C — optional, enabled by default)
+  std::shared_ptr<UpdaterGroundPlane> updaterGroundPlane;
 
   /// This is the queue of measurement times that have come in since we starting doing initialization
   /// After we initialize, we will want to prop & update to the latest timestamp quickly
