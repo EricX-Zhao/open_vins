@@ -565,7 +565,7 @@ void VioManager::do_feature_propagate_update(const ov_core::CameraData &message)
 
   // Ground-plane homography update runs after delayed_init so new SLAM features are already in the state.
   if (updaterGroundPlane) {
-    updaterGroundPlane->apply_homography_plane_update(state, message.timestamp, leftovers);
+    updaterGroundPlane->promote_homography_points_to_slam(state, message.timestamp, leftovers);
   }
 
   //===================================================================================
