@@ -48,8 +48,15 @@ list(APPEND LIBRARY_SOURCES
 )
 file(GLOB_RECURSE LIBRARY_HEADERS "src/*.h")
 add_library(ov_core_lib SHARED ${LIBRARY_SOURCES} ${LIBRARY_HEADERS})
-ament_target_dependencies(ov_core_lib rclcpp cv_bridge apexpilot_logger)
-target_link_libraries(ov_core_lib ${thirdparty_libraries})
+
+target_link_libraries(ov_core_lib
+PUBLIC
+  ${thirdparty_libraries} 
+  apexpilot_logger::apexpilot_logger
+  rclcpp::rclcpp
+  cv_bridge::cv_bridge
+)
+
 target_include_directories(ov_core_lib PUBLIC src/)
 install(TARGETS ov_core_lib
         LIBRARY DESTINATION lib

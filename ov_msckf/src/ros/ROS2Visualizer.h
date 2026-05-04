@@ -48,9 +48,11 @@
 #include <tf2_ros/transform_broadcaster.h>
 
 #include <atomic>
+#include <condition_variable>
 #include <fstream>
 #include <memory>
 #include <mutex>
+#include <thread>
 
 #include <Eigen/Eigen>
 #include <boost/date_time/posix_time/posix_time.hpp>
@@ -87,6 +89,8 @@ public:
    * @param sim Simulator if we are simulating
    */
   ROS2Visualizer(std::shared_ptr<rclcpp::Node> node, std::shared_ptr<VioManager> app, std::shared_ptr<Simulator> sim = nullptr);
+
+  ~ROS2Visualizer();
 
   /**
    * @brief Will setup ROS subscribers and callbacks
@@ -143,6 +147,12 @@ protected:
   /// Publish loop-closure information of current pose and active track information
   void publish_loopclosure_information();
 
+  /// Worker thread body: waits on _worker_cv, then drains the camera queue.
+  void worker_thread_fn();
+
+  /// Drain the camera queue for all frames whose timestamp is older than imu_ts.
+  void process_camera_queue(double imu_ts);
+
   /// Global node handler
   std::shared_ptr<rclcpp::Node> _node;
 
@@ -193,8 +203,13 @@ protected:
   bool start_time_set = false;
   boost::posix_time::ptime rT1, rT2;
 
-  // Thread atomics
-  std::atomic<bool> thread_update_running;
+  // Persistent worker thread for camera queue processing
+  std::thread _worker_thread;
+  std::condition_variable _worker_cv;
+  std::mutex _worker_mtx;
+  double _pending_imu_ts = 0.0;
+  bool _worker_triggered = false;
+  std::atomic<bool> _worker_running{false};
 
   /// Queue up camera measurements sorted by time and trigger once we have
   /// exactly one IMU measurement with timestamp newer than the camera measurement

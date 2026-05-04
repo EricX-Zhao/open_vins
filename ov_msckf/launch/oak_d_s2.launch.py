@@ -44,6 +44,11 @@ launch_args = [
         name="save_total_state",
         default_value="false",
         description="record the total state with calibration and features to a txt file",
+    ),
+    DeclareLaunchArgument(
+        name="Log dir",
+        default_value="/userlogs",
+        description="Log dir",
     )
 ]
 
@@ -74,7 +79,11 @@ def launch_setup(context):
                         config_path)
                     )
             ]
+    
+    log_dir = LaunchConfiguration("log_dir").perform(context)
+
     print("config_path: ", config_path)
+    print("log_dir: ", log_dir)
     node1 = Node(
         package="ov_msckf",
         executable="run_subscribe_msckf",
@@ -89,7 +98,7 @@ def launch_setup(context):
             {"max_cameras": LaunchConfiguration("max_cameras")},
             {"save_total_state": LaunchConfiguration("save_total_state")},
             {"config_path": config_path},
-            {"log_dir": "/workspace/openvins_log"},
+            {"log_dir": log_dir},
         ],
     )
 

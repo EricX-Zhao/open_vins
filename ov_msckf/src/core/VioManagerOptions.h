@@ -30,6 +30,7 @@
 #include <vector>
 
 #include "state/StateOptions.h"
+#include "update/UpdaterGroundPlane.h"
 #include "update/UpdaterOptions.h"
 #include "utils/NoiseManager.h"
 
@@ -128,12 +129,16 @@ struct VioManagerOptions {
     PRINT_DEBUG("  - zupt_only_at_beginning?: %d\n", zupt_only_at_beginning);
     PRINT_DEBUG("  - record timing?: %d\n", (int)record_timing_information);
     PRINT_DEBUG("  - record timing filepath: %s\n", record_timing_filepath.c_str());
+    gp_options.print_and_load(parser);
   }
 
   // NOISE / CHI2 ============================
 
   /// Continuous-time IMU noise (gyroscope and accelerometer)
   NoiseManager imu_noises;
+
+  /// Ground-plane updater options
+  UpdaterGroundPlane::Options gp_options;
 
   /// Update options for MSCKF features (pixel noise and chi2 multiplier)
   UpdaterOptions msckf_options;

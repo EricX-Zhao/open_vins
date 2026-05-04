@@ -157,7 +157,7 @@ VioManager::VioManager(VioManagerOptions &params_) : thread_init_running(false),
   updaterSLAM = std::make_shared<UpdaterSLAM>(params.slam_options, params.aruco_options, params.featinit_options);
 
   // Ground-plane updater (Method C) — always created; individual features controlled by Options flags
-  updaterGroundPlane = std::make_shared<UpdaterGroundPlane>(UpdaterGroundPlane::Options{});
+  updaterGroundPlane = std::make_shared<UpdaterGroundPlane>(params.gp_options);
 
   // If we are using zero velocity updates, then create the updater
   if (params.try_zupt) {

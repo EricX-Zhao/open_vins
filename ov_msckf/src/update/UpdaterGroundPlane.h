@@ -29,6 +29,8 @@
 #include <Eigen/Eigen>
 
 #include "feat/Feature.h"
+#include "utils/opencv_yaml_parse.h"
+#include "utils/print.h"
 
 namespace ov_msckf {
 
@@ -52,13 +54,51 @@ public:
 
     // --- homography promotion ---
     double homography_ransac_thresh = 0.005;   ///< RANSAC inlier threshold in normalised image coords
-    double homography_min_inlier_ratio = 0.4;  ///< minimum fraction of features that must be inliers
+    double homography_min_inlier_ratio = 0.7;  ///< minimum fraction of features that must be inliers
     int homography_min_inliers = 8;            ///< minimum absolute inlier count
-    double max_recovery_depth = 300.0;         ///< maximum valid recovered depth [m]
+    double max_recovery_depth = 400.0;         ///< maximum valid recovered depth [m]
 
-    int homography_persistent_max_add_per_update = 6; ///< hard cap per frame
+    int homography_persistent_max_add_per_update = 15; ///< hard cap per frame
     double homography_persistent_sigma_min = 3.0;     ///< minimum init stddev in global xyz [m]
     double homography_persistent_sigma_h_rel_scale = 0.03; ///< extra init stddev scaling with altitude [m/m]
+
+    /**
+     * @brief Load parameters from a YAML parser and print current values.
+     * @param parser If not null, values are read from the config file; otherwise defaults are printed.
+     */
+    void print_and_load(const std::shared_ptr<ov_core::YamlParser> &parser = nullptr) {
+      if (parser != nullptr) {
+        // height
+        parser->parse_config("gp_sigma_height", sigma_height, false);
+        parser->parse_config("gp_sigma_height_low", sigma_height_low, false);
+        parser->parse_config("gp_height_sigma_transition", height_sigma_transition, false);
+        parser->parse_config("gp_max_height_jump", max_height_jump, false);
+        parser->parse_config("gp_min_height_for_update", min_height_for_update, false);
+        parser->parse_config("gp_height_chi2_multiplier", height_chi2_multiplier, false);
+        // homography
+        parser->parse_config("gp_homography_ransac_thresh", homography_ransac_thresh, false);
+        parser->parse_config("gp_homography_min_inlier_ratio", homography_min_inlier_ratio, false);
+        parser->parse_config("gp_homography_min_inliers", homography_min_inliers, false);
+        parser->parse_config("gp_max_recovery_depth", max_recovery_depth, false);
+        parser->parse_config("gp_homography_persistent_max_add_per_update", homography_persistent_max_add_per_update, false);
+        parser->parse_config("gp_homography_persistent_sigma_min", homography_persistent_sigma_min, false);
+        parser->parse_config("gp_homography_persistent_sigma_h_rel_scale", homography_persistent_sigma_h_rel_scale, false);
+      }
+      PRINT_DEBUG("GROUND PLANE PARAMETERS:\n");
+      PRINT_DEBUG("  - gp_sigma_height: %.3f\n", sigma_height);
+      PRINT_DEBUG("  - gp_sigma_height_low: %.3f\n", sigma_height_low);
+      PRINT_DEBUG("  - gp_height_sigma_transition: %.1f\n", height_sigma_transition);
+      PRINT_DEBUG("  - gp_max_height_jump: %.2f\n", max_height_jump);
+      PRINT_DEBUG("  - gp_min_height_for_update: %.2f\n", min_height_for_update);
+      PRINT_DEBUG("  - gp_height_chi2_multiplier: %.2f\n", height_chi2_multiplier);
+      PRINT_DEBUG("  - gp_homography_ransac_thresh: %.4f\n", homography_ransac_thresh);
+      PRINT_DEBUG("  - gp_homography_min_inlier_ratio: %.2f\n", homography_min_inlier_ratio);
+      PRINT_DEBUG("  - gp_homography_min_inliers: %d\n", homography_min_inliers);
+      PRINT_DEBUG("  - gp_max_recovery_depth: %.1f\n", max_recovery_depth);
+      PRINT_DEBUG("  - gp_persistent_max_add_per_update: %d\n", homography_persistent_max_add_per_update);
+      PRINT_DEBUG("  - gp_persistent_sigma_min: %.2f\n", homography_persistent_sigma_min);
+      PRINT_DEBUG("  - gp_persistent_sigma_h_rel_scale: %.4f\n", homography_persistent_sigma_h_rel_scale);
+    }
   };
 
   explicit UpdaterGroundPlane(const Options &opt);

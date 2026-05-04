@@ -41,7 +41,7 @@ using namespace ov_type;
 using namespace ov_msckf;
 
 ROS2Visualizer::ROS2Visualizer(std::shared_ptr<rclcpp::Node> node, std::shared_ptr<VioManager> app, std::shared_ptr<Simulator> sim)
-    : _node(node), _app(app), _sim(sim), thread_update_running(false) {
+    : _node(node), _app(app), _sim(sim) {
 
   // Setup our transform broadcaster
   mTfBr = std::make_shared<tf2_ros::TransformBroadcaster>(node);
@@ -168,6 +168,24 @@ ROS2Visualizer::ROS2Visualizer(std::shared_ptr<rclcpp::Node> node, std::shared_p
       }
     });
     thread.detach();
+  }
+
+  // Start persistent worker thread for camera queue processing
+  if (_app->get_params().use_multi_threading_subs) {
+    _worker_running = true;
+    _worker_thread = std::thread(&ROS2Visualizer::worker_thread_fn, this);
+  }
+}
+
+ROS2Visualizer::~ROS2Visualizer() {
+  if (_worker_thread.joinable()) {
+    {
+      std::lock_guard<std::mutex> lk(_worker_mtx);
+      _worker_running = false;
+      _worker_triggered = true;
+    }
+    _worker_cv.notify_one();
+    _worker_thread.join();
   }
 }
 
@@ -475,63 +493,74 @@ void ROS2Visualizer::visualize_final() {
   PRINT_INFO(REDPURPLE "TIME: %.3f seconds\n\n" RESET, (rT2 - rT1).total_microseconds() * 1e-6);
 }
 
+void ROS2Visualizer::worker_thread_fn() {
+  while (true) {
+    double imu_ts;
+    {
+      std::unique_lock<std::mutex> lk(_worker_mtx);
+      _worker_cv.wait(lk, [&] { return _worker_triggered; });
+      if (!_worker_running)
+        break;
+      imu_ts = _pending_imu_ts;
+      _worker_triggered = false;
+    }
+    process_camera_queue(imu_ts);
+  }
+}
+
+void ROS2Visualizer::process_camera_queue(double imu_ts) {
+  std::lock_guard<std::mutex> lck(camera_queue_mtx);
+
+  // Count how many unique image streams are present in the queue
+  std::map<int, bool> unique_cam_ids;
+  for (const auto &cam_msg : camera_queue) {
+    unique_cam_ids[cam_msg.sensor_ids.at(0)] = true;
+  }
+
+  // Wait until we have one frame from each camera to preserve propagation order
+  auto params = _app->get_params();
+  size_t num_unique_cameras = (params.state_options.num_cameras == 2) ? 1 : params.state_options.num_cameras;
+  if (unique_cam_ids.size() < num_unique_cameras)
+    return;
+
+  double timestamp_imu_inC = imu_ts - _app->get_state()->_calib_dt_CAMtoIMU->value()(0);
+  while (!camera_queue.empty() && camera_queue.at(0).timestamp < timestamp_imu_inC) {
+    auto rT0_1 = boost::posix_time::microsec_clock::local_time();
+    double update_dt = 100.0 * (timestamp_imu_inC - camera_queue.at(0).timestamp);
+    _app->feed_measurement_camera(camera_queue.at(0));
+    visualize();
+    camera_queue.pop_front();
+    auto rT0_2 = boost::posix_time::microsec_clock::local_time();
+    double time_total = (rT0_2 - rT0_1).total_microseconds() * 1e-6;
+    PRINT_INFO(BLUE "[TIME]: %.4f seconds total (%.1f hz, %.2f ms behind)\n" RESET, time_total, 1.0 / time_total, update_dt);
+  }
+}
+
 void ROS2Visualizer::callback_inertial(const sensor_msgs::msg::Imu::SharedPtr msg) {
 
-  // convert into correct format
+  // Convert into correct format
   ov_core::ImuData message;
   message.timestamp = msg->header.stamp.sec + msg->header.stamp.nanosec * 1e-9;
   message.wm << msg->angular_velocity.x, msg->angular_velocity.y, msg->angular_velocity.z;
   message.am << msg->linear_acceleration.x, msg->linear_acceleration.y, msg->linear_acceleration.z;
 
-  // send it to our VIO system
+  // Send IMU data and publish odometry at full IMU rate
   _app->feed_measurement_imu(message);
   visualize_odometry(message.timestamp);
 
-  // If the processing queue is currently active / running just return so we can keep getting measurements
-  // Otherwise create a second thread to do our update in an async manor
-  // The visualization of the state, images, and features will be synchronous with the update!
-  if (thread_update_running)
-    return;
-  thread_update_running = true;
-  std::thread thread([&] {
-    // Lock on the queue (prevents new images from appending)
-    std::lock_guard<std::mutex> lck(camera_queue_mtx);
-
-    // Count how many unique image streams
-    std::map<int, bool> unique_cam_ids;
-    for (const auto &cam_msg : camera_queue) {
-      unique_cam_ids[cam_msg.sensor_ids.at(0)] = true;
+  if (_worker_running) {
+    // Async path: hand latest IMU timestamp to the persistent worker thread.
+    // Overwriting _pending_imu_ts while the worker is busy is intentional —
+    // the worker will drain the queue to the newest timestamp on its next iteration.
+    {
+      std::lock_guard<std::mutex> lk(_worker_mtx);
+      _pending_imu_ts = message.timestamp;
+      _worker_triggered = true;
     }
-
-    // If we do not have enough unique cameras then we need to wait
-    // We should wait till we have one of each camera to ensure we propagate in the correct order
-    auto params = _app->get_params();
-    size_t num_unique_cameras = (params.state_options.num_cameras == 2) ? 1 : params.state_options.num_cameras;
-    if (unique_cam_ids.size() == num_unique_cameras) {
-
-      // Loop through our queue and see if we are able to process any of our camera measurements
-      // We are able to process if we have at least one IMU measurement greater than the camera time
-      double timestamp_imu_inC = message.timestamp - _app->get_state()->_calib_dt_CAMtoIMU->value()(0);
-      while (!camera_queue.empty() && camera_queue.at(0).timestamp < timestamp_imu_inC) {
-        auto rT0_1 = boost::posix_time::microsec_clock::local_time();
-        double update_dt = 100.0 * (timestamp_imu_inC - camera_queue.at(0).timestamp);
-        _app->feed_measurement_camera(camera_queue.at(0));
-        visualize();
-        camera_queue.pop_front();
-        auto rT0_2 = boost::posix_time::microsec_clock::local_time();
-        double time_total = (rT0_2 - rT0_1).total_microseconds() * 1e-6;
-        PRINT_INFO(BLUE "[TIME]: %.4f seconds total (%.1f hz, %.2f ms behind)\n" RESET, time_total, 1.0 / time_total, update_dt);
-      }
-    }
-    thread_update_running = false;
-  });
-
-  // If we are single threaded, then run single threaded
-  // Otherwise detach this thread so it runs in the background!
-  if (!_app->get_params().use_multi_threading_subs) {
-    thread.join();
+    _worker_cv.notify_one();
   } else {
-    thread.detach();
+    // Sync path (use_multi_threading_subs = false): process inline.
+    process_camera_queue(message.timestamp);
   }
 }
 
