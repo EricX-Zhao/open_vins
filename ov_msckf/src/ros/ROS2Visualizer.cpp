@@ -54,6 +54,8 @@ ROS2Visualizer::ROS2Visualizer(std::shared_ptr<rclcpp::Node> node, std::shared_p
   PRINT_DEBUG("Publishing: %s\n", pub_poseimu->get_topic_name());
   pub_odomimu = node->create_publisher<nav_msgs::msg::Odometry>("odomimu", 2);
   PRINT_DEBUG("Publishing: %s\n", pub_odomimu->get_topic_name());
+  pub_odomimu_enu = node->create_publisher<nav_msgs::msg::Odometry>("/mavros/odometry/out_enu", 2);
+  PRINT_DEBUG("Publishing: %s\n", pub_odomimu_enu->get_topic_name());
   pub_pathimu = node->create_publisher<nav_msgs::msg::Path>("pathimu", 2);
   PRINT_DEBUG("Publishing: %s\n", pub_pathimu->get_topic_name());
 
@@ -259,13 +261,11 @@ void ROS2Visualizer::setup_subscribers(std::shared_ptr<ov_core::YamlParser> pars
       fcs_odom_height_.store(odom_height);
       _app->feed_measurement_height(rclcpp::Time(odom_msg->header.stamp).seconds(), odom_height);
 
-      // std::lock_guard<std::mutex> lock(odom_buffer_mutex_);
-      // odom_buffer_.insert({rclcpp::Time(odom_msg->header.stamp).nanoseconds(), *odom_msg});
-      // if (odom_buffer_.size() > 100) {
-      //   odom_buffer_.erase(odom_buffer_.begin());
-      // }
-      // PRINT_DEBUG("[FCS_ODOM]: velocity: [%.2f, %.2f, %.2f]\n", 
-      //     odom_msg->twist.twist.linear.x, odom_msg->twist.twist.linear.y, odom_msg->twist.twist.linear.z);
+      std::lock_guard<std::mutex> lock(odom_buffer_mutex_);
+      odom_buffer_.insert({rclcpp::Time(odom_msg->header.stamp).nanoseconds(), *odom_msg});
+      if (odom_buffer_.size() > 100) {
+        odom_buffer_.erase(odom_buffer_.begin());
+      }
       
   });
 }
@@ -407,6 +407,119 @@ void ROS2Visualizer::visualize_odometry(double timestamp) {
   }
 }
 
+void ROS2Visualizer::publish_enu_odometry(double timestamp) {
+
+  // Return if VIO is not yet initialized
+  if (!_app->initialized() || (timestamp - _app->initialized_time()) < 1)
+    return;
+
+  // Use current optimized state directly (camera-update rate), no extra propagation here
+  std::shared_ptr<State> state = _app->get_state();
+
+  // Find FCS odometry closest in time to the VIO timestamp
+  nav_msgs::msg::Odometry closest_fcs_odom;
+  bool found_fcs = false;
+  {
+    std::lock_guard<std::mutex> lock(odom_buffer_mutex_);
+    if (!odom_buffer_.empty()) {
+      const int64_t vio_time_ns = static_cast<int64_t>(timestamp * 1e9);
+      auto it = odom_buffer_.lower_bound(vio_time_ns);
+      if (it == odom_buffer_.end()) {
+        --it;
+      } else if (it != odom_buffer_.begin()) {
+        auto prev = std::prev(it);
+        if (vio_time_ns - prev->first < it->first - vio_time_ns)
+          it = prev;
+      }
+      closest_fcs_odom = it->second;
+      found_fcs = true;
+    }
+  }
+  if (!found_fcs)
+    return;
+
+  // VIO state in OV world frame.
+  // NOTE: OpenVINS stores JPL q_GtoI as [x,y,z,w]. Reusing the same coefficients in Eigen::Quaterniond
+  // (Hamilton) yields q_ItoG, which is exactly the body-in-world orientation we need for ROS odometry.
+  const Eigen::Quaterniond q_ovw_b(state->_imu->quat()(3), state->_imu->quat()(0), state->_imu->quat()(1), state->_imu->quat()(2));
+  const Eigen::Vector3d ov_P(state->_imu->pos()(0), state->_imu->pos()(1), state->_imu->pos()(2));
+  const Eigen::Vector3d ov_V(state->_imu->vel()(0), state->_imu->vel()(1), state->_imu->vel()(2));
+  PRINT_INFO("VIO OVW: q=%.3f,%.3f,%.3f,%.3f p=%.3f,%.3f,%.3f v=%.3f,%.3f,%.3f\n", q_ovw_b.w(), q_ovw_b.x(), q_ovw_b.y(), q_ovw_b.z(),
+      ov_P.x(), ov_P.y(), ov_P.z(), ov_V.x(), ov_V.y(), ov_V.z());
+  // Capture ENU yaw offset once at VIO init: offset = yaw_fcs_init - yaw_vio_init
+  if (!has_init_enu_odom_) {
+    const Eigen::Quaterniond q_fcs_init(
+        closest_fcs_odom.pose.pose.orientation.w,
+        closest_fcs_odom.pose.pose.orientation.x,
+        closest_fcs_odom.pose.pose.orientation.y,
+        closest_fcs_odom.pose.pose.orientation.z);
+    const double yaw_fcs_init = std::atan2(
+        2.0 * (q_fcs_init.w() * q_fcs_init.z() + q_fcs_init.x() * q_fcs_init.y()),
+        1.0 - 2.0 * (q_fcs_init.y() * q_fcs_init.y() + q_fcs_init.z() * q_fcs_init.z()));
+    const double yaw_vio_init = std::atan2(
+        2.0 * (q_ovw_b.w() * q_ovw_b.z() + q_ovw_b.x() * q_ovw_b.y()),
+        1.0 - 2.0 * (q_ovw_b.y() * q_ovw_b.y() + q_ovw_b.z() * q_ovw_b.z()));
+    yaw_enu_ovw_ = yaw_fcs_init - yaw_vio_init;
+    has_init_enu_odom_ = true;
+    PRINT_INFO("[ENU] Initialized ENU yaw offset: yaw_fcs=%.2fdeg yaw_vio=%.2fdeg offset=%.2fdeg\n",
+        yaw_fcs_init * 180.0 / M_PI, yaw_vio_init * 180.0 / M_PI, yaw_enu_ovw_ * 180.0 / M_PI);
+  }
+
+  // Build yaw-only rotation from OV world to ENU.
+  const Eigen::Quaterniond q_enu_ovw(Eigen::AngleAxisd(yaw_enu_ovw_, Eigen::Vector3d::UnitZ()));
+
+  // Compose orientation as (E<-W) * (W<-B) = (E<-B)
+  const Eigen::Quaterniond q_enu_b = q_enu_ovw * q_ovw_b;
+  const Eigen::Vector3d enu_P = q_enu_ovw * ov_P;
+  const Eigen::Vector3d enu_V = q_enu_ovw * ov_V;
+
+  // Publish ENU odometry
+  nav_msgs::msg::Odometry odom_enu;
+  odom_enu.header.stamp = ROSVisualizerHelper::get_time_from_seconds(timestamp);
+  odom_enu.header.frame_id = "map";
+  odom_enu.child_frame_id = "base_link";
+  odom_enu.pose.pose.position.x = enu_P.x();
+  odom_enu.pose.pose.position.y = enu_P.y();
+  odom_enu.pose.pose.position.z = enu_P.z();
+  odom_enu.pose.pose.orientation.w = q_enu_b.w();
+  odom_enu.pose.pose.orientation.x = q_enu_b.x();
+  odom_enu.pose.pose.orientation.y = q_enu_b.y();
+  odom_enu.pose.pose.orientation.z = q_enu_b.z();
+  odom_enu.twist.twist.linear.x = enu_V.x();
+  odom_enu.twist.twist.linear.y = enu_V.y();
+  odom_enu.twist.twist.linear.z = enu_V.z();
+  odom_enu.twist.covariance[0] = 75.0;
+  pub_odomimu_enu->publish(odom_enu);
+
+  // Yaw monitoring: compare VIO-ENU yaw with current FCS yaw
+  const Eigen::Quaterniond q_fcs(
+      closest_fcs_odom.pose.pose.orientation.w,
+      closest_fcs_odom.pose.pose.orientation.x,
+      closest_fcs_odom.pose.pose.orientation.y,
+      closest_fcs_odom.pose.pose.orientation.z);
+  const double yaw_fcs = std::atan2(
+      2.0 * (q_fcs.w() * q_fcs.z() + q_fcs.x() * q_fcs.y()),
+      1.0 - 2.0 * (q_fcs.y() * q_fcs.y() + q_fcs.z() * q_fcs.z()));
+  const double yaw_enu_b = std::atan2(
+      2.0 * (q_enu_b.w() * q_enu_b.z() + q_enu_b.x() * q_enu_b.y()),
+      1.0 - 2.0 * (q_enu_b.y() * q_enu_b.y() + q_enu_b.z() * q_enu_b.z()));
+  double yaw_diff_deg = (yaw_enu_b - yaw_fcs) * 180.0 / M_PI;
+  if (yaw_diff_deg > 180.0) yaw_diff_deg -= 360.0;
+  if (yaw_diff_deg < -180.0) yaw_diff_deg += 360.0;
+  PRINT_DEBUG("[ENU] yaw_vio=%.2fdeg yaw_fcs=%.2fdeg yaw_diff=%.2fdeg\n",
+      yaw_enu_b * 180.0 / M_PI, yaw_fcs * 180.0 / M_PI, yaw_diff_deg);
+
+  // Auto-correct stored yaw offset when drift exceeds threshold
+  constexpr double kYawCorrectionThresholdDeg = 5.0;
+  if (std::abs(yaw_diff_deg) > kYawCorrectionThresholdDeg) {
+    const double prev_offset_deg = yaw_enu_ovw_ * 180.0 / M_PI;
+    yaw_enu_ovw_ -= (yaw_enu_b - yaw_fcs);  // both in radians
+    PRINT_WARNING("[ENU] VIO yaw drift %.2fdeg exceeds %.1fdeg, correcting offset: %.2fdeg -> %.2fdeg\n",
+        yaw_diff_deg, kYawCorrectionThresholdDeg,
+        prev_offset_deg, yaw_enu_ovw_ * 180.0 / M_PI);
+  }
+}
+
 void ROS2Visualizer::visualize_final() {
 
   // Final time offset value
@@ -528,6 +641,7 @@ void ROS2Visualizer::process_camera_queue(double imu_ts) {
     auto rT0_1 = boost::posix_time::microsec_clock::local_time();
     double update_dt = 100.0 * (timestamp_imu_inC - camera_queue.at(0).timestamp);
     _app->feed_measurement_camera(camera_queue.at(0));
+    publish_enu_odometry(camera_queue.at(0).timestamp);
     visualize();
     camera_queue.pop_front();
     auto rT0_2 = boost::posix_time::microsec_clock::local_time();

@@ -129,6 +129,9 @@ protected:
   /// Publish the current state
   void publish_state();
 
+  /// Publish ENU-aligned odometry (called at camera rate after VIO update)
+  void publish_enu_odometry(double timestamp);
+
   /// Publish the active tracking image
   void publish_images();
 
@@ -186,6 +189,13 @@ protected:
   bool is_first_odom_ = true;
   float fcs_init_height_ = 0.0;
   std::atomic<float> fcs_odom_height_;
+
+  // ENU conversion via FCS odometry yaw alignment
+  rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pub_odomimu_enu;
+  std::map<int64_t, nav_msgs::msg::Odometry> odom_buffer_;
+  std::mutex odom_buffer_mutex_;
+  double yaw_enu_ovw_ = 0.0;  ///< yaw offset: rotates VIO world frame to ENU (radians)
+  bool has_init_enu_odom_ = false;
 
   // For path viz
   std::vector<geometry_msgs::msg::PoseStamped> poses_imu;
