@@ -76,8 +76,8 @@ int main(int argc, char **argv) {
   apexpilot::LoggerOption log_options;
   log_options.log_level = "debug";
   log_options.log_dir = log_dir;
-  log_options.std_output = true;
-  log_options.max_size = 100*1024*1024;
+  log_options.std_output = false;
+  log_options.max_size = 50*1024*1024;
   apexpilot::create_logger("openvins", log_options);
 #endif
 
