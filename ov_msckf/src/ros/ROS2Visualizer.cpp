@@ -201,7 +201,7 @@ void ROS2Visualizer::setup_subscribers(std::shared_ptr<ov_core::YamlParser> pars
   _node->declare_parameter<std::string>("topic_imu", "/imu0");
   _node->get_parameter("topic_imu", topic_imu);
   parser->parse_external("relative_config_imu", "imu0", "rostopic", topic_imu);
-  sub_imu = _node->create_subscription<sensor_msgs::msg::Imu>(topic_imu, rclcpp::SensorDataQoS(),
+  sub_imu = _node->create_subscription<sensor_msgs::msg::Imu>(topic_imu, rclcpp::SensorDataQoS().keep_last(400),
                                                               std::bind(&ROS2Visualizer::callback_inertial, this, std::placeholders::_1));
   PRINT_INFO("subscribing to IMU: %s\n", topic_imu.c_str());
 
@@ -250,7 +250,7 @@ void ROS2Visualizer::setup_subscribers(std::shared_ptr<ov_core::YamlParser> pars
 
   std::string fcs_odom_topic = "/mavros/odometry/in";
   fcs_odom_sub_ = _node->create_subscription<nav_msgs::msg::Odometry>(
-    fcs_odom_topic, 5,
+    fcs_odom_topic, 10,
     [&] ( const nav_msgs::msg::Odometry::ConstSharedPtr& odom_msg) {
       if (is_first_odom_) {
         fcs_init_height_ = static_cast<float>(odom_msg->pose.pose.position.z);
@@ -715,6 +715,11 @@ void ROS2Visualizer::callback_monocular(const sensor_msgs::msg::Image::SharedPtr
   std::lock_guard<std::mutex> lck(camera_queue_mtx);
   camera_queue.push_back(message);
   std::sort(camera_queue.begin(), camera_queue.end());
+  // Cap queue size: if VIO falls behind, drop oldest frames to prevent OOM
+  while (camera_queue.size() > 10) {
+    PRINT_WARNING(YELLOW "[WARN]: camera_queue overflow, dropping oldest frame\n" RESET);
+    camera_queue.pop_front();
+  }
 }
 
 void ROS2Visualizer::callback_stereo(const sensor_msgs::msg::Image::ConstSharedPtr msg0, const sensor_msgs::msg::Image::ConstSharedPtr msg1,
@@ -769,6 +774,11 @@ void ROS2Visualizer::callback_stereo(const sensor_msgs::msg::Image::ConstSharedP
   std::lock_guard<std::mutex> lck(camera_queue_mtx);
   camera_queue.push_back(message);
   std::sort(camera_queue.begin(), camera_queue.end());
+  // Cap queue size: if VIO falls behind, drop oldest frames to prevent OOM
+  while (camera_queue.size() > 10) {
+    PRINT_WARNING(YELLOW "[WARN]: camera_queue overflow, dropping oldest frame\n" RESET);
+    camera_queue.pop_front();
+  }
 }
 
 void ROS2Visualizer::publish_state() {
