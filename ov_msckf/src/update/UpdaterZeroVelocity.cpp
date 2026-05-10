@@ -203,7 +203,16 @@ bool UpdaterZeroVelocity::try_update(std::shared_ptr<State> state, double timest
     P_marg.block(3, 3, 6, 6) += Q_bias;
   }
   Eigen::MatrixXd S = H * P_marg * H.transpose() + R;
-  double chi2 = res.dot(S.llt().solve(res));
+  Eigen::LLT<Eigen::MatrixXd> llt_of_S(S);
+  if (llt_of_S.info() != Eigen::Success) {
+    PRINT_WARNING(YELLOW "[ZUPT]: S matrix not positive-definite, skipping ZUPT\n" RESET);
+    return false;
+  }
+  double chi2 = res.dot(llt_of_S.solve(res));
+  if (std::isnan(chi2) || std::isinf(chi2)) {
+    PRINT_WARNING(YELLOW "[ZUPT]: chi2 is NaN/Inf, skipping ZUPT\n" RESET);
+    return false;
+  }
 
   // Get our threshold (we precompute up to 1000 but handle the case that it is more)
   double chi2_check;

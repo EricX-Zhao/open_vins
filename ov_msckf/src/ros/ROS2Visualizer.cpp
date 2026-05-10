@@ -637,6 +637,11 @@ void ROS2Visualizer::process_camera_queue(double imu_ts) {
     return;
 
   double timestamp_imu_inC = imu_ts - _app->get_state()->_calib_dt_CAMtoIMU->value()(0);
+  if (std::isnan(timestamp_imu_inC) || std::isinf(timestamp_imu_inC)) {
+    PRINT_WARNING(YELLOW "[WARN]: NaN/Inf in timestamp_imu_inC — VIO state corrupted, clearing camera queue\n" RESET);
+    camera_queue.clear();
+    return;
+  }
   while (!camera_queue.empty() && camera_queue.at(0).timestamp < timestamp_imu_inC) {
     auto rT0_1 = boost::posix_time::microsec_clock::local_time();
     double update_dt = 100.0 * (timestamp_imu_inC - camera_queue.at(0).timestamp);
