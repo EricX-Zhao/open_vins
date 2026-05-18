@@ -90,7 +90,7 @@ def launch_setup(context):
         condition=IfCondition(LaunchConfiguration("ov_enable")),
         namespace=LaunchConfiguration("namespace"),
         output='screen',
-        # prefix=['taskset -c 4,5,6,7'],
+        prefix=['taskset -c 4,5,6,7'],
         # prefix=['xterm -fa "Monospace" -fs 16 -geometry 180x50 -sl 10000 -xrm "XTerm*selectToClipboard: true" -e gdb -ex run --args'],
         parameters=[
             {"verbosity": LaunchConfiguration("verbosity")},

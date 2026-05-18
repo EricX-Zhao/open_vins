@@ -27,6 +27,7 @@
 #include <vector>
 
 #include <Eigen/Eigen>
+#include <opencv2/core/types.hpp>
 
 #include "feat/Feature.h"
 #include "utils/opencv_yaml_parse.h"
@@ -49,7 +50,7 @@ public:
     double sigma_height_low = 2.0;       ///< stddev of baro noise below height_sigma_transition [m] (less reliable near ground)
     double height_sigma_transition = 15.0; ///< altitude [m] at which sigma switches from sigma_height_low to sigma_height
     double max_height_jump = 2.0;        ///< innovation jump threshold for outlier rejection [m]
-    double min_height_for_update = 5.0;  ///< skip height update when h_rel below this [m] (baro totally unreliable near ground)
+    double min_height_for_update = 10.0;  ///< skip height update when h_rel below this [m] (baro totally unreliable near ground)
     double height_chi2_multiplier = 2.0; ///< multiplier on chi2 gate threshold
 
     // --- homography promotion ---
@@ -61,6 +62,14 @@ public:
     int homography_persistent_max_add_per_update = 15; ///< hard cap per frame
     double homography_persistent_sigma_min = 3.0;     ///< minimum init stddev in global xyz [m]
     double homography_persistent_sigma_h_rel_scale = 0.03; ///< extra init stddev scaling with altitude [m/m]
+
+    // --- SLAM-point plane fitting ---
+    int slam_plane_min_points = 5;                    ///< minimum SLAM landmarks to attempt plane fit
+    double slam_plane_ransac_thresh_base = 0.1;       ///< base inlier distance to plane [m]
+    double slam_plane_ransac_thresh_h_scale = 0.02;   ///< additional threshold per metre of altitude [m/m]
+    int slam_plane_ransac_iterations = 100;           ///< RANSAC iterations for plane fitting
+    double slam_plane_min_inlier_ratio = 0.7;         ///< minimum inlier ratio for a valid plane fit
+    double slam_plane_max_h_err_ratio = 0.3;          ///< reject plane if |n·p_drone + d - h_rel| > ratio * h_rel
 
     /**
      * @brief Load parameters from a YAML parser and print current values.
@@ -83,6 +92,13 @@ public:
         parser->parse_config("gp_homography_persistent_max_add_per_update", homography_persistent_max_add_per_update, false);
         parser->parse_config("gp_homography_persistent_sigma_min", homography_persistent_sigma_min, false);
         parser->parse_config("gp_homography_persistent_sigma_h_rel_scale", homography_persistent_sigma_h_rel_scale, false);
+        // SLAM plane fitting
+        parser->parse_config("gp_slam_plane_min_points", slam_plane_min_points, false);
+        parser->parse_config("gp_slam_plane_ransac_thresh_base", slam_plane_ransac_thresh_base, false);
+        parser->parse_config("gp_slam_plane_ransac_thresh_h_scale", slam_plane_ransac_thresh_h_scale, false);
+        parser->parse_config("gp_slam_plane_ransac_iterations", slam_plane_ransac_iterations, false);
+        parser->parse_config("gp_slam_plane_min_inlier_ratio", slam_plane_min_inlier_ratio, false);
+        parser->parse_config("gp_slam_plane_max_h_err_ratio", slam_plane_max_h_err_ratio, false);
       }
       PRINT_DEBUG("GROUND PLANE PARAMETERS:\n");
       PRINT_DEBUG("  - gp_sigma_height: %.3f\n", sigma_height);
@@ -98,6 +114,12 @@ public:
       PRINT_DEBUG("  - gp_persistent_max_add_per_update: %d\n", homography_persistent_max_add_per_update);
       PRINT_DEBUG("  - gp_persistent_sigma_min: %.2f\n", homography_persistent_sigma_min);
       PRINT_DEBUG("  - gp_persistent_sigma_h_rel_scale: %.4f\n", homography_persistent_sigma_h_rel_scale);
+      PRINT_DEBUG("  - gp_slam_plane_min_points: %d\n", slam_plane_min_points);
+      PRINT_DEBUG("  - gp_slam_plane_ransac_thresh_base: %.3f\n", slam_plane_ransac_thresh_base);
+      PRINT_DEBUG("  - gp_slam_plane_ransac_thresh_h_scale: %.4f\n", slam_plane_ransac_thresh_h_scale);
+      PRINT_DEBUG("  - gp_slam_plane_ransac_iterations: %d\n", slam_plane_ransac_iterations);
+      PRINT_DEBUG("  - gp_slam_plane_min_inlier_ratio: %.2f\n", slam_plane_min_inlier_ratio);
+      PRINT_DEBUG("  - gp_slam_plane_max_h_err_ratio: %.2f\n", slam_plane_max_h_err_ratio);
     }
   };
 
@@ -116,11 +138,17 @@ public:
    */
   void try_height_update(std::shared_ptr<State> state, double timestamp);
 
-  /// Plane model is disabled in the trimmed pipeline; always false.
-  bool is_plane_initialized() const { return false; }
+  /// Returns true when a valid ground plane has been fitted from SLAM landmarks.
+  bool is_plane_initialized() const { return _plane_valid; }
 
-  /// Current CP vector (always zero in the trimmed pipeline).
+  /// Closest point on the fitted plane to the origin; zero if plane is not yet valid.
   Eigen::Vector3d get_cp() const;
+
+  /// Unit normal of the fitted plane (pointing upward); UnitZ when not yet valid.
+  Eigen::Vector3d get_plane_normal() const { return _plane_normal; }
+
+  /// Plane offset parameter satisfying n^T * X + d = 0; 0 when not yet valid.
+  double get_plane_d() const { return _plane_d; }
 
   /// 3D points recovered by the most recent homography update (empty if not run yet)
   const std::vector<Eigen::Vector3d> &get_homography_plane_points() const { return _homography_plane_points; }
@@ -139,6 +167,20 @@ private:
   bool interp_height(double t, double &h_out) const;
   void calibrate_offset_if_needed(std::shared_ptr<State> state, double t);
   void do_height_update(std::shared_ptr<State> state, double t);
+
+  /// Fit a ground plane from current SLAM landmarks via RANSAC + SVD.
+  /// Results are stored in _plane_normal, _plane_d, _plane_valid.
+  void fit_plane_from_slam_points(std::shared_ptr<State> state, double h_rel);
+
+  /// Stage B: refine _plane_normal/_plane_d using Stage A inliers + reprojected 2D inliers.
+  void refine_plane_stage_b(const Eigen::Matrix3d &R_GtoC, const Eigen::Vector3d &p_CcinG,
+                             const std::vector<cv::Point2f> &pts_cur_norm, const std::vector<uchar> &mask);
+
+  /// Recover 3D positions for homography inliers via plane-ray intersection (or baro fallback).
+  void recover_3d_points(const Eigen::Matrix3d &R_GtoC, const Eigen::Vector3d &p_CcinG,
+                          const std::vector<cv::Point2f> &pts_cur_norm, const std::vector<size_t> &feat_ids,
+                          const std::vector<uchar> &mask, double h_rel,
+                          std::vector<Eigen::Vector3d> &pts3d, std::vector<size_t> &out_ids) const;
 
   /// Internal helper: inject already recovered points into the SLAM state.
   void promote_homography_points_to_slam_from_points(std::shared_ptr<State> state, const std::vector<size_t> &feat_ids,
@@ -162,6 +204,13 @@ private:
 
   // 3D points from the most recent homography update (for visualization)
   std::vector<Eigen::Vector3d> _homography_plane_points;
+
+  // Ground plane fitted from SLAM landmarks: n^T * X + d = 0, ||n|| = 1
+  Eigen::Vector3d _plane_normal = Eigen::Vector3d::UnitZ();
+  double _plane_d = 0.0;
+  bool _plane_valid = false;
+  // RANSAC inlier points from the most recent Stage A fit (used by Stage B)
+  std::vector<Eigen::Vector3d> _plane_inlier_pts;
 };
 
 } // namespace ov_msckf

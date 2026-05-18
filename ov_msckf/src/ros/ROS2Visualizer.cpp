@@ -913,36 +913,37 @@ void ROS2Visualizer::publish_ground_plane() {
   if (pub_plane_marker->get_subscription_count() == 0 && pub_points_planar->get_subscription_count() == 0)
     return;
 
-  if (!_app->get_state())
+  auto state = _app->get_state();
+  if (!state)
     return;
 
-  // Get ground-plane updater from VioManager
   auto gp = _app->get_ground_plane_updater();
   if (!gp || !gp->is_plane_initialized())
     return;
 
-  Eigen::Vector3d cp = gp->get_cp();
-  double d = cp.norm();
-  if (d < 1e-6)
-    return;
+  // Plane parameters: n^T * X + d = 0, ||n|| = 1, n points upward
+  Eigen::Vector3d n = gp->get_plane_normal();
+  double plane_d = gp->get_plane_d();
 
-  Eigen::Vector3d n = cp / d; // plane normal (pointing from origin toward plane)
+  // Project current drone (IMU) position onto the plane so the patch follows the drone
+  Eigen::Vector3d p_drone = state->_imu->pos();
+  double h_above = n.dot(p_drone) + plane_d;   // signed altitude above plane (positive = above)
+  Eigen::Vector3d center = p_drone - h_above * n; // foot of perpendicular from drone to plane
 
-  // ---- Build two orthogonal tangent vectors in the plane ----
+  // Build two orthogonal tangent vectors in the plane
   Eigen::Vector3d t;
   if (std::abs(n.x()) < 0.9)
     t = n.cross(Eigen::Vector3d::UnitX()).normalized();
   else
     t = n.cross(Eigen::Vector3d::UnitY()).normalized();
-  Eigen::Vector3d b = n.cross(t).normalized(); // bitangent
+  Eigen::Vector3d b = n.cross(t).normalized();
 
-  const double half = 3.0; // half-size of the displayed patch [m]
+  const double half = 5.0; // half-size of patch [m] — centered below drone
 
-  // Four corners of the square patch centred at cp
-  Eigen::Vector3d A = cp + half * t + half * b;
-  Eigen::Vector3d B = cp + half * t - half * b;
-  Eigen::Vector3d C = cp - half * t - half * b;
-  Eigen::Vector3d D = cp - half * t + half * b;
+  Eigen::Vector3d A = center + half * t + half * b;
+  Eigen::Vector3d B = center + half * t - half * b;
+  Eigen::Vector3d C = center - half * t - half * b;
+  Eigen::Vector3d D = center - half * t + half * b;
 
   auto make_point = [](const Eigen::Vector3d &p) {
     geometry_msgs::msg::Point pt;
@@ -952,11 +953,11 @@ void ROS2Visualizer::publish_ground_plane() {
     return pt;
   };
 
-  auto ts = ROSVisualizerHelper::get_time_from_seconds(_app->get_state()->_timestamp);
+  auto ts = ROSVisualizerHelper::get_time_from_seconds(state->_timestamp);
 
   visualization_msgs::msg::MarkerArray arr;
 
-  // ---- Marker 0: semi-transparent plane patch (TRIANGLE_LIST) ----
+  // ---- Marker 0: semi-transparent plane patch (TRIANGLE_LIST, double-sided) ----
   {
     visualization_msgs::msg::Marker m;
     m.header.stamp = ts;
@@ -974,15 +975,14 @@ void ROS2Visualizer::publish_ground_plane() {
     m.color.a = 0.35f;
     m.pose.orientation.w = 1.0;
 
-    // Triangle 1: A-B-C
+    // Front face
     m.points.push_back(make_point(A));
     m.points.push_back(make_point(B));
     m.points.push_back(make_point(C));
-    // Triangle 2: A-C-D
     m.points.push_back(make_point(A));
     m.points.push_back(make_point(C));
     m.points.push_back(make_point(D));
-    // Back-face triangles so it's visible from both sides
+    // Back face (reversed winding)
     m.points.push_back(make_point(C));
     m.points.push_back(make_point(B));
     m.points.push_back(make_point(A));
@@ -993,7 +993,7 @@ void ROS2Visualizer::publish_ground_plane() {
     arr.markers.push_back(m);
   }
 
-  // ---- Marker 1: normal arrow from CP toward origin ----
+  // ---- Marker 1: normal arrow rising from center of patch ----
   {
     visualization_msgs::msg::Marker m;
     m.header.stamp = ts;
@@ -1002,47 +1002,44 @@ void ROS2Visualizer::publish_ground_plane() {
     m.id = 1;
     m.type = visualization_msgs::msg::Marker::ARROW;
     m.action = visualization_msgs::msg::Marker::ADD;
-    m.scale.x = 0.05;  // shaft diameter
-    m.scale.y = 0.10;  // head diameter
-    m.scale.z = 0.15;  // head length
+    m.scale.x = 0.05;
+    m.scale.y = 0.10;
+    m.scale.z = 0.15;
     m.color.r = 1.0f;
     m.color.g = 0.5f;
     m.color.b = 0.0f;
     m.color.a = 0.9f;
     m.pose.orientation.w = 1.0;
 
-    // Arrow from cp tip, pointing in normal direction (length = 0.5 m)
-    m.points.push_back(make_point(cp));
-    m.points.push_back(make_point(cp + 0.5 * n));
+    m.points.push_back(make_point(center));
+    m.points.push_back(make_point(center + 0.8 * n));
 
     arr.markers.push_back(m);
   }
 
-  // ---- Marker 2: sphere at the CP (closest point on plane) ----
+  // ---- Marker 2: vertical line from patch center up to drone ----
   {
     visualization_msgs::msg::Marker m;
     m.header.stamp = ts;
     m.header.frame_id = "global";
     m.ns = "ground_plane";
     m.id = 2;
-    m.type = visualization_msgs::msg::Marker::SPHERE;
+    m.type = visualization_msgs::msg::Marker::LINE_LIST;
     m.action = visualization_msgs::msg::Marker::ADD;
-    m.pose.position.x = cp.x();
-    m.pose.position.y = cp.y();
-    m.pose.position.z = cp.z();
-    m.pose.orientation.w = 1.0;
-    m.scale.x = 0.12;
-    m.scale.y = 0.12;
-    m.scale.z = 0.12;
+    m.scale.x = 0.04; // line width
     m.color.r = 1.0f;
     m.color.g = 1.0f;
     m.color.b = 0.0f;
-    m.color.a = 1.0f;
+    m.color.a = 0.8f;
+    m.pose.orientation.w = 1.0;
+
+    m.points.push_back(make_point(center));
+    m.points.push_back(make_point(p_drone));
 
     arr.markers.push_back(m);
   }
 
-  // ---- Marker 3: TEXT showing plane distance ----
+  // ---- Marker 3: text label showing altitude above plane and tilt ----
   {
     visualization_msgs::msg::Marker m;
     m.header.stamp = ts;
@@ -1051,18 +1048,20 @@ void ROS2Visualizer::publish_ground_plane() {
     m.id = 3;
     m.type = visualization_msgs::msg::Marker::TEXT_VIEW_FACING;
     m.action = visualization_msgs::msg::Marker::ADD;
-    m.pose.position.x = cp.x();
-    m.pose.position.y = cp.y();
-    m.pose.position.z = cp.z() + 0.3;
+    // Place text halfway between patch center and drone
+    Eigen::Vector3d text_pos = center + 0.5 * h_above * n;
+    m.pose.position.x = text_pos.x();
+    m.pose.position.y = text_pos.y();
+    m.pose.position.z = text_pos.z();
     m.pose.orientation.w = 1.0;
-    m.scale.z = 0.15; // text height
+    m.scale.z = 0.20;
     m.color.r = 1.0f;
     m.color.g = 1.0f;
     m.color.b = 1.0f;
     m.color.a = 1.0f;
 
-    char buf[64];
-    snprintf(buf, sizeof(buf), "GP d=%.2fm n=[%.2f,%.2f,%.2f]", d, n.x(), n.y(), n.z());
+    char buf[80];
+    snprintf(buf, sizeof(buf), "h=%.2fm  n=[%.2f,%.2f,%.2f]", h_above, n.x(), n.y(), n.z());
     m.text = std::string(buf);
 
     arr.markers.push_back(m);
