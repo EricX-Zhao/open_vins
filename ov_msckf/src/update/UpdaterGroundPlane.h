@@ -54,8 +54,6 @@ public:
     double height_chi2_multiplier = 2.0; ///< multiplier on chi2 gate threshold
 
     // --- homography promotion ---
-    double homography_ransac_thresh = 0.005;   ///< RANSAC inlier threshold in normalised image coords
-    double homography_min_inlier_ratio = 0.7;  ///< minimum fraction of features that must be inliers
     int homography_min_inliers = 8;            ///< minimum absolute inlier count
     double max_recovery_depth = 400.0;         ///< maximum valid recovered depth [m]
 
@@ -70,6 +68,7 @@ public:
     int slam_plane_ransac_iterations = 100;           ///< RANSAC iterations for plane fitting
     double slam_plane_min_inlier_ratio = 0.7;         ///< minimum inlier ratio for a valid plane fit
     double slam_plane_max_h_err_ratio = 0.3;          ///< reject plane if |n·p_drone + d - h_rel| > ratio * h_rel
+    double plane_smooth_alpha = 0.3;                  ///< EMA weight for a fresh plane fit (1.0 = no smoothing)
 
     /**
      * @brief Load parameters from a YAML parser and print current values.
@@ -85,8 +84,6 @@ public:
         parser->parse_config("gp_min_height_for_update", min_height_for_update, false);
         parser->parse_config("gp_height_chi2_multiplier", height_chi2_multiplier, false);
         // homography
-        parser->parse_config("gp_homography_ransac_thresh", homography_ransac_thresh, false);
-        parser->parse_config("gp_homography_min_inlier_ratio", homography_min_inlier_ratio, false);
         parser->parse_config("gp_homography_min_inliers", homography_min_inliers, false);
         parser->parse_config("gp_max_recovery_depth", max_recovery_depth, false);
         parser->parse_config("gp_homography_persistent_max_add_per_update", homography_persistent_max_add_per_update, false);
@@ -99,6 +96,7 @@ public:
         parser->parse_config("gp_slam_plane_ransac_iterations", slam_plane_ransac_iterations, false);
         parser->parse_config("gp_slam_plane_min_inlier_ratio", slam_plane_min_inlier_ratio, false);
         parser->parse_config("gp_slam_plane_max_h_err_ratio", slam_plane_max_h_err_ratio, false);
+        parser->parse_config("gp_plane_smooth_alpha", plane_smooth_alpha, false);
       }
       PRINT_DEBUG("GROUND PLANE PARAMETERS:\n");
       PRINT_DEBUG("  - gp_sigma_height: %.3f\n", sigma_height);
@@ -107,8 +105,6 @@ public:
       PRINT_DEBUG("  - gp_max_height_jump: %.2f\n", max_height_jump);
       PRINT_DEBUG("  - gp_min_height_for_update: %.2f\n", min_height_for_update);
       PRINT_DEBUG("  - gp_height_chi2_multiplier: %.2f\n", height_chi2_multiplier);
-      PRINT_DEBUG("  - gp_homography_ransac_thresh: %.4f\n", homography_ransac_thresh);
-      PRINT_DEBUG("  - gp_homography_min_inlier_ratio: %.2f\n", homography_min_inlier_ratio);
       PRINT_DEBUG("  - gp_homography_min_inliers: %d\n", homography_min_inliers);
       PRINT_DEBUG("  - gp_max_recovery_depth: %.1f\n", max_recovery_depth);
       PRINT_DEBUG("  - gp_persistent_max_add_per_update: %d\n", homography_persistent_max_add_per_update);
@@ -120,6 +116,7 @@ public:
       PRINT_DEBUG("  - gp_slam_plane_ransac_iterations: %d\n", slam_plane_ransac_iterations);
       PRINT_DEBUG("  - gp_slam_plane_min_inlier_ratio: %.2f\n", slam_plane_min_inlier_ratio);
       PRINT_DEBUG("  - gp_slam_plane_max_h_err_ratio: %.2f\n", slam_plane_max_h_err_ratio);
+      PRINT_DEBUG("  - gp_plane_smooth_alpha: %.2f\n", plane_smooth_alpha);
     }
   };
 
@@ -172,14 +169,13 @@ private:
   /// Results are stored in _plane_normal, _plane_d, _plane_valid.
   void fit_plane_from_slam_points(std::shared_ptr<State> state, double h_rel);
 
-  /// Stage B: refine _plane_normal/_plane_d using Stage A inliers + reprojected 2D inliers.
-  void refine_plane_stage_b(const Eigen::Matrix3d &R_GtoC, const Eigen::Vector3d &p_CcinG,
-                             const std::vector<cv::Point2f> &pts_cur_norm, const std::vector<uchar> &mask);
+  /// Blend the current (_plane_normal,_plane_d) fit into the running EMA estimate (temporal smoothing).
+  void apply_plane_smoothing();
 
-  /// Recover 3D positions for homography inliers via plane-ray intersection (or baro fallback).
+  /// Recover 3D positions for leftover features via plane-ray intersection (or baro fallback).
   void recover_3d_points(const Eigen::Matrix3d &R_GtoC, const Eigen::Vector3d &p_CcinG,
                           const std::vector<cv::Point2f> &pts_cur_norm, const std::vector<size_t> &feat_ids,
-                          const std::vector<uchar> &mask, double h_rel,
+                          double h_rel,
                           std::vector<Eigen::Vector3d> &pts3d, std::vector<size_t> &out_ids) const;
 
   /// Internal helper: inject already recovered points into the SLAM state.
@@ -211,6 +207,11 @@ private:
   bool _plane_valid = false;
   // RANSAC inlier points from the most recent Stage A fit (used by Stage B)
   std::vector<Eigen::Vector3d> _plane_inlier_pts;
+
+  // Temporal smoothing (EMA) of the fitted plane across frames
+  bool _plane_smooth_init = false;
+  Eigen::Vector3d _plane_normal_smoothed = Eigen::Vector3d::UnitZ();
+  double _plane_d_smoothed = 0.0;
 };
 
 } // namespace ov_msckf

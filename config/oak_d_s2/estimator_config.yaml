@@ -105,9 +105,9 @@ downsize_aruco: true
 fi_triangulate_1d: false
 fi_min_dist: 0.1
 fi_max_dist: 500.0
-# fi_max_baseline: 500
-fi_max_cond_number: 5000
-fi_refine_features: false
+fi_max_baseline: 100
+fi_max_cond_number: 10000
+fi_refine_features: true
 # ==================================================================
 # ==================================================================
 
@@ -115,7 +115,7 @@ fi_refine_features: false
 up_msckf_sigma_px: 1.5
 up_msckf_chi2_multipler: 1
 up_slam_sigma_px: 1.5
-up_slam_chi2_multipler: 2
+up_slam_chi2_multipler: 0.75
 up_aruco_sigma_px: 1
 up_aruco_chi2_multipler: 1
 

@@ -25,9 +25,7 @@
 #include "types/LandmarkRepresentation.h"
 #include "utils/print.h"
 
-#include <boost/date_time/posix_time/posix_time.hpp>
 #include <boost/math/distributions/chi_squared.hpp>
-#include <opencv2/calib3d.hpp>
 
 #include <algorithm>
 #include <cmath>
@@ -76,11 +74,10 @@ bool get_camera_pose(const std::shared_ptr<State> &state, size_t cam_id, double 
   return true;
 }
 
-// Build normalised-coord correspondences (prev→cur) from leftover features at timestamps t_prev / t_cur.
+// Collect normalised cur-frame observations of leftover features that are also tracked at t_prev.
 void collect_feature_correspondences(const std::vector<std::shared_ptr<ov_core::Feature>> &leftovers,
                                      size_t cam_id, double t_prev, double t_cur,
-                                     std::vector<cv::Point2f> &pts_prev, std::vector<cv::Point2f> &pts_cur,
-                                     std::vector<size_t> &ids) {
+                                     std::vector<cv::Point2f> &pts_cur, std::vector<size_t> &ids) {
   for (const auto &feat : leftovers) {
     auto cam_it = feat->timestamps.find(cam_id);
     if (cam_it == feat->timestamps.end())
@@ -101,7 +98,6 @@ void collect_feature_correspondences(const std::vector<std::shared_ptr<ov_core::
       continue;
 
     pts_cur.emplace_back((float)uvs[idx_cur](0), (float)uvs[idx_cur](1));
-    pts_prev.emplace_back((float)uvs[idx_prev](0), (float)uvs[idx_prev](1));
     ids.push_back(feat->featid);
   }
 }
@@ -126,16 +122,32 @@ void UpdaterGroundPlane::fit_plane_from_slam_points(std::shared_ptr<State> state
   _plane_valid = false;
   _plane_inlier_pts.clear();
 
-  // Collect 3D positions from all non-aruco SLAM landmarks.
-  // get_xyz() handles all representations (GLOBAL_3D, ANCHORED_MSCKF_INVERSE_DEPTH, etc.)
-  // and returns global-frame coordinates in every case.
+  // Collect 3D positions from all non-aruco SLAM landmarks, all expressed in the global frame.
+  // NOTE: get_xyz() only returns global coordinates for GLOBAL_* representations; for anchored
+  // representations it returns p_FinA in that landmark's anchor camera frame, so those must be
+  // transformed to global (see VioManager::get_features_SLAM for the same pattern).
   const int aruco_max = 4 * state->_options.max_aruco_features;
   std::vector<Eigen::Vector3d> pts;
   pts.reserve(state->_features_SLAM.size());
   for (const auto &kv : state->_features_SLAM) {
     if ((int)kv.first <= aruco_max)
       continue;
-    pts.push_back(kv.second->get_xyz(false));
+    const auto &lm = kv.second;
+    if (LandmarkRepresentation::is_relative_representation(lm->_feat_representation)) {
+      // Anchored representation: get_xyz() returns p_FinA (anchor camera frame).
+      // Transform to global using the anchor camera calibration + anchor clone pose.
+      auto calib_it = state->_calib_IMUtoCAM.find(lm->_anchor_cam_id);
+      auto clone_it = state->_clones_IMU.find(lm->_anchor_clone_timestamp);
+      if (calib_it == state->_calib_IMUtoCAM.end() || clone_it == state->_clones_IMU.end())
+        continue;
+      const Eigen::Matrix3d R_ItoC = calib_it->second->Rot();
+      const Eigen::Vector3d p_IinC = calib_it->second->pos();
+      const Eigen::Matrix3d R_GtoI = clone_it->second->Rot();
+      const Eigen::Vector3d p_IinG = clone_it->second->pos();
+      pts.push_back(R_GtoI.transpose() * R_ItoC.transpose() * (lm->get_xyz(false) - p_IinC) + p_IinG);
+    } else {
+      pts.push_back(lm->get_xyz(false));
+    }
   }
 
   if ((int)pts.size() < _opt.slam_plane_min_points) {
@@ -211,6 +223,8 @@ void UpdaterGroundPlane::fit_plane_from_slam_points(std::shared_ptr<State> state
     return;
   }
 
+  // Temporal smoothing: blend this fit into the running EMA estimate
+  apply_plane_smoothing();
   _plane_valid = true;
 
   PRINT_DEBUG("[GP-plane] Stage A: n=[%.3f,%.3f,%.3f] d=%.3f inliers=%d/%d (h_rel=%.1f)\n",
@@ -218,45 +232,26 @@ void UpdaterGroundPlane::fit_plane_from_slam_points(std::shared_ptr<State> state
               (int)_plane_inlier_pts.size(), N, h_rel);
 }
 
-void UpdaterGroundPlane::refine_plane_stage_b(const Eigen::Matrix3d &R_GtoC, const Eigen::Vector3d &p_CcinG,
-                                               const std::vector<cv::Point2f> &pts_cur_norm,
-                                               const std::vector<uchar> &mask) {
-  if (!_plane_valid || _plane_inlier_pts.empty())
+void UpdaterGroundPlane::apply_plane_smoothing() {
+  if (!_plane_smooth_init) {
+    // First valid fit seeds the running estimate; keep the fresh fit as-is.
+    _plane_normal_smoothed = _plane_normal;
+    _plane_d_smoothed = _plane_d;
+    _plane_smooth_init = true;
     return;
-
-  // Start from Stage A inlier points (ground-verified), then add current-frame inlier projections.
-  std::vector<Eigen::Vector3d> refine_pts = _plane_inlier_pts;
-  for (size_t i = 0; i < pts_cur_norm.size(); i++) {
-    if (!mask[i])
-      continue;
-    Eigen::Vector3d ray_G = R_GtoC.transpose() * Eigen::Vector3d((double)pts_cur_norm[i].x, (double)pts_cur_norm[i].y, 1.0);
-    double denom = _plane_normal.dot(ray_G);
-    if (denom >= -1e-4)
-      continue;
-    double t = -(_plane_normal.dot(p_CcinG) + _plane_d) / denom;
-    if (t < 0.1 || t > _opt.max_recovery_depth)
-      continue;
-    refine_pts.push_back(p_CcinG + t * ray_G);
   }
-
-  if ((int)refine_pts.size() < _opt.slam_plane_min_points)
-    return;
-
-  Eigen::Vector3d n_new;
-  double d_new;
-  if (!svd_fit_plane(refine_pts, n_new, d_new) || std::abs(n_new(2)) < 0.7)
-    return;
-
-  _plane_normal = n_new;
-  _plane_d = d_new;
-  PRINT_DEBUG("[GP-plane] Stage B: n=[%.3f,%.3f,%.3f] d=%.3f pts=%zu\n",
-              _plane_normal(0), _plane_normal(1), _plane_normal(2), _plane_d, refine_pts.size());
+  const double a = _opt.plane_smooth_alpha;
+  Eigen::Vector3d n = a * _plane_normal + (1.0 - a) * _plane_normal_smoothed;
+  if (n.norm() > 1e-9)
+    _plane_normal_smoothed = n.normalized();
+  _plane_d_smoothed = a * _plane_d + (1.0 - a) * _plane_d_smoothed;
+  _plane_normal = _plane_normal_smoothed;
+  _plane_d = _plane_d_smoothed;
 }
 
 void UpdaterGroundPlane::recover_3d_points(const Eigen::Matrix3d &R_GtoC, const Eigen::Vector3d &p_CcinG,
                                             const std::vector<cv::Point2f> &pts_cur_norm,
-                                            const std::vector<size_t> &feat_ids,
-                                            const std::vector<uchar> &mask, double h_rel,
+                                            const std::vector<size_t> &feat_ids, double h_rel,
                                             std::vector<Eigen::Vector3d> &pts3d,
                                             std::vector<size_t> &out_ids) const {
   pts3d.clear();
@@ -265,8 +260,6 @@ void UpdaterGroundPlane::recover_3d_points(const Eigen::Matrix3d &R_GtoC, const 
   out_ids.reserve(pts_cur_norm.size());
 
   for (size_t i = 0; i < pts_cur_norm.size(); i++) {
-    if (!mask[i])
-      continue;
     Eigen::Vector3d ray_G = R_GtoC.transpose() * Eigen::Vector3d((double)pts_cur_norm[i].x, (double)pts_cur_norm[i].y, 1.0);
 
     double t_depth;
@@ -413,7 +406,7 @@ void UpdaterGroundPlane::promote_homography_points_to_slam(std::shared_ptr<State
   // Stage A: fit ground plane from existing SLAM landmarks
   fit_plane_from_slam_points(state, h_rel);
 
-  // Camera pose at the two most-recent clones
+  // Camera pose at the most-recent clone (t_prev gates which leftover features are still tracked)
   if ((int)state->_clones_IMU.size() < 2)
     return;
   auto it = state->_clones_IMU.end();
@@ -426,47 +419,25 @@ void UpdaterGroundPlane::promote_homography_points_to_slam(std::shared_ptr<State
   if (!get_camera_pose(state, cam_id, t_cur, R_GtoC, p_CcinG))
     return;
 
-  // 2D correspondences from leftover features
-  std::vector<cv::Point2f> pts_prev_norm, pts_cur_norm;
+  // Cur-frame observations of leftover features that are also tracked at t_prev
+  std::vector<cv::Point2f> pts_cur_norm;
   std::vector<size_t> feat_ids_norm;
-  collect_feature_correspondences(leftovers, cam_id, t_prev, t_cur, pts_prev_norm, pts_cur_norm, feat_ids_norm);
+  collect_feature_correspondences(leftovers, cam_id, t_prev, t_cur, pts_cur_norm, feat_ids_norm);
   if ((int)pts_cur_norm.size() < _opt.homography_min_inliers)
     return;
-
-  // 2D-2D homography RANSAC inlier check
-  auto rT0 = boost::posix_time::microsec_clock::local_time();
-  std::vector<uchar> mask;
-  cv::Mat H_cv = cv::findHomography(pts_prev_norm, pts_cur_norm, cv::RANSAC,
-                                    _opt.homography_ransac_thresh, mask, 2000, 0.999);
-  auto rT1 = boost::posix_time::microsec_clock::local_time();
-  if (H_cv.empty())
-    return;
-
-  int n_inliers = std::count(mask.begin(), mask.end(), (uchar)1);
-  double inlier_ratio = (double)n_inliers / (double)pts_cur_norm.size();
-  PRINT_DEBUG("[GP-homo-promote] feats=%zu inliers=%d ratio=%.2f h_rel=%.2f plane_valid=%d\n",
-              pts_cur_norm.size(), n_inliers, inlier_ratio, h_rel, (int)_plane_valid);
-  if (n_inliers < _opt.homography_min_inliers || inlier_ratio < _opt.homography_min_inlier_ratio)
-    return;
-
-  // Stage B: refine plane with current-frame inlier reprojections
-  refine_plane_stage_b(R_GtoC, p_CcinG, pts_cur_norm, mask);
 
   // 3D recovery via plane-ray intersection (or baro fallback)
   std::vector<Eigen::Vector3d> pts3d;
   std::vector<size_t> pts_feat_ids;
-  recover_3d_points(R_GtoC, p_CcinG, pts_cur_norm, feat_ids_norm, mask, h_rel, pts3d, pts_feat_ids);
+  recover_3d_points(R_GtoC, p_CcinG, pts_cur_norm, feat_ids_norm, h_rel, pts3d, pts_feat_ids);
 
   _homography_plane_points = pts3d;
   if ((int)pts3d.size() < _opt.homography_min_inliers)
     return;
 
   promote_homography_points_to_slam_from_points(state, pts_feat_ids, pts3d, h_rel);
-  auto rT2 = boost::posix_time::microsec_clock::local_time();
   PRINT_DEBUG("[GP-homo-promote] promoted from %zu recovered points (h_rel=%.1f plane=%d)\n",
               pts3d.size(), h_rel, (int)_plane_valid);
-  PRINT_DEBUG("[GP-homo-timing] findHomography=%.4fs promote_to_slam=%.4fs\n",
-              (rT1 - rT0).total_microseconds() * 1e-6, (rT2 - rT1).total_microseconds() * 1e-6);
 }
 
 void UpdaterGroundPlane::promote_homography_points_to_slam_from_points(std::shared_ptr<State> state, const std::vector<size_t> &feat_ids,

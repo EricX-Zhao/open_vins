@@ -538,7 +538,7 @@ void VioManager::do_feature_propagate_update(const ov_core::CameraData &message)
   if ((int)featsup_MSCKF.size() > state->_options.max_msckf_in_update)
     featsup_MSCKF.erase(featsup_MSCKF.begin(), featsup_MSCKF.end() - state->_options.max_msckf_in_update);
   std::vector<std::shared_ptr<Feature>> leftovers; // triangulation failures → v3.1 plane recovery
-  updaterMSCKF->update(state, featsup_MSCKF, &leftovers);
+  updaterMSCKF->update(state, featsup_MSCKF);
   propagator->invalidate_cache();
   rT4 = boost::posix_time::microsec_clock::local_time();
 
