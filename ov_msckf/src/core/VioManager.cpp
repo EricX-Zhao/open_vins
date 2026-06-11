@@ -67,6 +67,37 @@ VioManager::VioManager(VioManagerOptions &params_) : thread_init_running(false),
   cv::setNumThreads(params.num_opencv_threads);
   cv::setRNGSeed(0);
 
+  // Create the state and all estimator modules from params
+  // NOTE: this is factored out so that a health-triggered reset can rebuild everything
+  build_modules();
+
+  //===================================================================================
+  //===================================================================================
+  //===================================================================================
+
+  // If we are recording statistics, then open our file
+  if (params.record_timing_information) {
+    // If the file exists, then delete it
+    if (boost::filesystem::exists(params.record_timing_filepath)) {
+      boost::filesystem::remove(params.record_timing_filepath);
+      PRINT_INFO(YELLOW "[STATS]: found old file found, deleted...\n" RESET);
+    }
+    // Create the directory that we will open the file in
+    boost::filesystem::path p(params.record_timing_filepath);
+    boost::filesystem::create_directories(p.parent_path());
+    // Open our statistics file!
+    of_statistics.open(params.record_timing_filepath, std::ofstream::out | std::ofstream::app);
+    // Write the header information into it
+    of_statistics << "# timestamp (sec),tracking,propagation,msckf update,";
+    if (state->_options.max_slam_features > 0) {
+      of_statistics << "slam update,slam delayed,";
+    }
+    of_statistics << "re-tri & marg,total" << std::endl;
+  }
+}
+
+void VioManager::build_modules() {
+
   // Create the state!!
   state = std::make_shared<State>(params.state_options);
 
@@ -97,34 +128,6 @@ VioManager::VioManager(VioManagerOptions &params_) : thread_init_running(false),
     state->_calib_IMUtoCAM.at(i)->set_value(params.camera_extrinsics.at(i));
     state->_calib_IMUtoCAM.at(i)->set_fej(params.camera_extrinsics.at(i));
   }
-
-  //===================================================================================
-  //===================================================================================
-  //===================================================================================
-
-  // If we are recording statistics, then open our file
-  if (params.record_timing_information) {
-    // If the file exists, then delete it
-    if (boost::filesystem::exists(params.record_timing_filepath)) {
-      boost::filesystem::remove(params.record_timing_filepath);
-      PRINT_INFO(YELLOW "[STATS]: found old file found, deleted...\n" RESET);
-    }
-    // Create the directory that we will open the file in
-    boost::filesystem::path p(params.record_timing_filepath);
-    boost::filesystem::create_directories(p.parent_path());
-    // Open our statistics file!
-    of_statistics.open(params.record_timing_filepath, std::ofstream::out | std::ofstream::app);
-    // Write the header information into it
-    of_statistics << "# timestamp (sec),tracking,propagation,msckf update,";
-    if (state->_options.max_slam_features > 0) {
-      of_statistics << "slam update,slam delayed,";
-    }
-    of_statistics << "re-tri & marg,total" << std::endl;
-  }
-
-  //===================================================================================
-  //===================================================================================
-  //===================================================================================
 
   // Let's make a feature extractor
   // NOTE: after we initialize we will increase the total number of feature tracks
@@ -164,6 +167,112 @@ VioManager::VioManager(VioManagerOptions &params_) : thread_init_running(false),
     updaterZUPT = std::make_shared<UpdaterZeroVelocity>(params.zupt_options, params.imu_noises, trackFEATS->get_feature_database(),
                                                         propagator, params.gravity_mag, params.zupt_max_velocity,
                                                         params.zupt_noise_multiplier, params.zupt_max_disparity);
+  }
+}
+
+void VioManager::reset_system(const std::string &reason) {
+
+  // Loudly report why we are throwing away the current estimate
+  PRINT_WARNING(RED "===================================================================\n" RESET);
+  PRINT_WARNING(RED "[RESET]: VIO health check failed, resetting and re-initializing!\n" RESET);
+  PRINT_WARNING(RED "[RESET]: reason: %s\n" RESET, reason.c_str());
+  PRINT_WARNING(RED "[RESET]: |v|=%.3f | ba=%.3f,%.3f,%.3f | bg=%.4f,%.4f,%.4f\n" RESET, state->_imu->vel().norm(),
+                state->_imu->bias_a()(0), state->_imu->bias_a()(1), state->_imu->bias_a()(2), state->_imu->bias_g()(0),
+                state->_imu->bias_g()(1), state->_imu->bias_g()(2));
+  PRINT_WARNING(RED "===================================================================\n" RESET);
+
+  // Preserve the ground-plane updater across the reset so the FCS height buffer
+  // (which is fed independently of VIO state) is not discarded.
+  auto gp_prev = updaterGroundPlane;
+
+  // Rebuild the state and every estimator module from the original config calibration.
+  // This drops the clones/SLAM features/covariance, the feature databases, and the propagator &
+  // zero-velocity IMU buffers, giving us a clean slate to re-initialize from.
+  build_modules();
+
+  // Restore the ground-plane updater with its accumulated height buffer intact.
+  updaterGroundPlane = gp_prev;
+
+  // Reset all of the run-time flags and bookkeeping so the next frame re-initializes
+  is_initialized_vio = false;
+  thread_init_success = false;
+  thread_init_running = false;
+  startup_time = -1;
+  timelastupdate = -1;
+  distance = 0;
+  has_moved_since_zupt = false;
+  did_zupt_update = false;
+  health_bad_count = 0;
+
+  // Drop any queued initialization timestamps
+  {
+    std::lock_guard<std::mutex> lck(camera_queue_init_mtx);
+    camera_queue_init.clear();
+  }
+
+  // Clear visualization caches that referenced the now-discarded state
+  good_features_MSCKF.clear();
+  active_tracks_time = -1;
+  active_tracks_posinG.clear();
+  active_tracks_uvd.clear();
+  active_image = cv::Mat();
+  active_feat_linsys_A.clear();
+  active_feat_linsys_b.clear();
+  active_feat_linsys_count.clear();
+}
+
+void VioManager::check_health_and_maybe_reset() {
+
+  // Skip entirely if disabled or we are not yet running the filter
+  if (!params.health_check_enabled || !is_initialized_vio)
+    return;
+
+  // Pull the quantities we monitor
+  double vnorm = state->_imu->vel().norm();
+  double ba_max = state->_imu->bias_a().cwiseAbs().maxCoeff();
+  double bg_max = state->_imu->bias_g().cwiseAbs().maxCoeff();
+
+  // Velocity covariance diagonal (max of 3 components); zero if disabled or state not in covariance
+  double vel_cov_max = 0.0;
+  if (params.health_max_vel_cov > 0.0) {
+    std::vector<std::shared_ptr<ov_type::Type>> vel_var = {state->_imu->v()};
+    Eigen::Matrix3d cov_v = StateHelper::get_marginal_covariance(state, vel_var);
+    vel_cov_max = cov_v.diagonal().maxCoeff();
+  }
+
+  // Any non-finite value means the filter has already blown up -> reset immediately
+  bool finite = state->_imu->quat().allFinite() && state->_imu->pos().allFinite() && state->_imu->vel().allFinite() &&
+                state->_imu->bias_a().allFinite() && state->_imu->bias_g().allFinite();
+  if (!finite) {
+    reset_system("non-finite (NaN/Inf) value in IMU state");
+    return;
+  }
+
+  // Divergence / bias-runaway / covariance-blowup checks
+  bool bad = (vnorm > params.health_max_velocity) || (ba_max > params.health_max_accel_bias) ||
+             (bg_max > params.health_max_gyro_bias) ||
+             (params.health_max_vel_cov > 0.0 && vel_cov_max > params.health_max_vel_cov);
+  if (!bad) {
+    health_bad_count = 0;
+    return;
+  }
+
+  // Debounce: only reset once the condition has persisted for several consecutive frames
+  health_bad_count++;
+  PRINT_WARNING(YELLOW "[HEALTH]: unhealthy frame %d/%d | |v|=%.3f (max %.1f) | |ba|=%.3f (max %.2f) | |bg|=%.4f (max %.2f) | vel_cov=%.4f (max %.4f)\n" RESET,
+                health_bad_count, params.health_consecutive_count, vnorm, params.health_max_velocity, ba_max,
+                params.health_max_accel_bias, bg_max, params.health_max_gyro_bias, vel_cov_max, params.health_max_vel_cov);
+  if (health_bad_count >= params.health_consecutive_count) {
+    std::string reason;
+    if (vnorm > params.health_max_velocity)
+      reason = "velocity divergence |v|=" + std::to_string(vnorm);
+    else if (ba_max > params.health_max_accel_bias)
+      reason = "accel bias runaway |ba|=" + std::to_string(ba_max);
+    else if (bg_max > params.health_max_gyro_bias)
+      reason = "gyro bias runaway |bg|=" + std::to_string(bg_max);
+    else
+      reason = "velocity covariance blowup vel_cov_max=" + std::to_string(vel_cov_max);
+    reset_system(reason);
   }
 }
 
@@ -268,6 +377,12 @@ void VioManager::track_image_and_update(const ov_core::CameraData &message_const
   // Start timing
   rT1 = boost::posix_time::microsec_clock::local_time();
 
+  // Honor an externally requested reset (e.g. ROS service) at this frame boundary, on the
+  // processing thread, so it cannot race the update. The current frame then re-initializes.
+  if (reset_requested.exchange(false)) {
+    reset_system("manual reset requested");
+  }
+
   // Assert we have valid measurement data and ids
   assert(!message_const.sensor_ids.empty());
   assert(message_const.sensor_ids.size() == message_const.images.size());
@@ -324,6 +439,11 @@ void VioManager::track_image_and_update(const ov_core::CameraData &message_const
       PRINT_DEBUG(BLUE "[TIME]: %.4f seconds for tracking\n" RESET, time_track);
       return;
     }
+    // Snap EKF z to FCS altitude using the preserved height offset.
+    // On first boot _offset_initialized=false so this is a no-op.
+    // After a reset, corrects z=0 to actual altitude so height residuals stay small.
+    if (updaterGroundPlane)
+      updaterGroundPlane->snap_height_to_state(state, message.timestamp);
   }
 
   // Call on our propagate and update function
@@ -675,7 +795,13 @@ void VioManager::do_feature_propagate_update(const ov_core::CameraData &message)
   PRINT_INFO("q_GtoI = %.3f,%.3f,%.3f,%.3f | p_IinG = %.3f,%.3f,%.3f | dist = %.2f (meters)\n", state->_imu->quat()(0),
              state->_imu->quat()(1), state->_imu->quat()(2), state->_imu->quat()(3), state->_imu->pos()(0), state->_imu->pos()(1),
              state->_imu->pos()(2), distance);
-  PRINT_INFO("v_IinG = %.3f,%.3f,%.3f\n", state->_imu->vel()(0), state->_imu->vel()(1), state->_imu->vel()(2));
+  {
+    Eigen::Matrix3d cov_v = StateHelper::get_marginal_covariance(state, {state->_imu->v()});
+    PRINT_INFO("v_IinG = %.3f,%.3f,%.3f | v_cov diag=[%.4f,%.4f,%.4f] off=[%.4f,%.4f,%.4f]\n",
+               state->_imu->vel()(0), state->_imu->vel()(1), state->_imu->vel()(2),
+               cov_v(0, 0), cov_v(1, 1), cov_v(2, 2),
+               cov_v(0, 1), cov_v(0, 2), cov_v(1, 2));
+  }
 
   PRINT_INFO("bg = %.4f,%.4f,%.4f | ba = %.4f,%.4f,%.4f\n", state->_imu->bias_g()(0), state->_imu->bias_g()(1), state->_imu->bias_g()(2),
              state->_imu->bias_a()(0), state->_imu->bias_a()(1), state->_imu->bias_a()(2));
@@ -734,4 +860,7 @@ void VioManager::do_feature_propagate_update(const ov_core::CameraData &message)
                state->_calib_imu_tg->value()(4), state->_calib_imu_tg->value()(5), state->_calib_imu_tg->value()(6),
                state->_calib_imu_tg->value()(7), state->_calib_imu_tg->value()(8));
   }
+
+  // Finally, check filter health and reset/re-initialize the system if it has diverged
+  check_health_and_maybe_reset();
 }

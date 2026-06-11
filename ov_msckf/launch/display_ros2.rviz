@@ -60,7 +60,9 @@ Visualization Manager:
       Show Names: true
       Tree:
         global:
-          {}
+          imu:
+            cam0:
+              {}
       Update Interval: 0
       Value: true
     - Class: rviz_default_plugins/Image
@@ -346,6 +348,18 @@ Visualization Manager:
       Use Fixed Frame: true
       Use rainbow: true
       Value: true
+    - Class: rviz_default_plugins/MarkerArray
+      Enabled: true
+      Name: MarkerArray
+      Namespaces:
+        ground_plane: true
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /ov_msckf/ground_plane
+      Value: true
   Enabled: true
   Global Options:
     Background Color: 48; 48; 48
@@ -390,25 +404,25 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz_default_plugins/Orbit
-      Distance: 354.0869445800781
+      Distance: 486.45623779296875
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
         Swap Stereo Eyes: false
         Value: false
       Focal Point:
-        X: -24.272506713867188
-        Y: 10.600395202636719
-        Z: 29.30974769592285
+        X: -13.513957977294922
+        Y: -7.923531532287598
+        Z: 27.108957290649414
       Focal Shape Fixed Size: false
       Focal Shape Size: 0.05000000074505806
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 1.085398554801941
+      Pitch: 0.06539900600910187
       Target Frame: <Fixed Frame>
       Value: Orbit (rviz)
-      Yaw: 3.0897748470306396
+      Yaw: 1.4797725677490234
     Saved: ~
 Window Geometry:
   Current Depths:
@@ -429,4 +443,4 @@ Window Geometry:
     collapsed: true
   Width: 2880
   X: 0
-  Y: 102
+  Y: 0

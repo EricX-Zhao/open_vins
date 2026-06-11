@@ -103,12 +103,23 @@ bool FeatureInitializer::single_triangulation(std::shared_ptr<Feature> feat,
   // Then set the flag for bad (i.e. set z-axis to nan)
   if (std::abs(condA) > _options.max_cond_number || p_f(2, 0) < _options.min_dist || p_f(2, 0) > _options.max_dist ||
       std::isnan(p_f.norm())) {
+    std::string reason;
+    if (std::isnan(p_f.norm()))
+      reason = "nan_depth";
+    else if (std::abs(condA) > _options.max_cond_number)
+      reason = "bad_cond (" + std::to_string(std::abs(condA)) + " > " + std::to_string(_options.max_cond_number) + ")";
+    else if (p_f(2, 0) < _options.min_dist)
+      reason = "too_close (" + std::to_string(p_f(2, 0)) + " < " + std::to_string(_options.min_dist) + ")";
+    else
+      reason = "too_far (" + std::to_string(p_f(2, 0)) + " > " + std::to_string(_options.max_dist) + ")";
+    PRINT_DEBUG("[FEAT-INIT]: feat %zu FAILED triangulation | reason=%s\n" RESET, feat->featid, reason.c_str());
     return false;
   }
 
   // Store it in our feature object
   feat->p_FinA = p_f;
   feat->p_FinG = R_GtoA.transpose() * feat->p_FinA + p_AinG;
+  PRINT_DEBUG("[FEAT-INIT]: feat %zu SUCCESS triangulation | depth=%.3fm\n", feat->featid, p_f(2, 0));
   return true;
 }
 
@@ -186,12 +197,21 @@ bool FeatureInitializer::single_triangulation_1d(std::shared_ptr<Feature> feat,
 
   // Then set the flag for bad (i.e. set z-axis to nan)
   if (p_f(2, 0) < _options.min_dist || p_f(2, 0) > _options.max_dist || std::isnan(p_f.norm())) {
+    std::string reason;
+    if (std::isnan(p_f.norm()))
+      reason = "nan_depth";
+    else if (p_f(2, 0) < _options.min_dist)
+      reason = "too_close (" + std::to_string(p_f(2, 0)) + " < " + std::to_string(_options.min_dist) + ")";
+    else
+      reason = "too_far (" + std::to_string(p_f(2, 0)) + " > " + std::to_string(_options.max_dist) + ")";
+    PRINT_DEBUG("[FEAT-INIT]: feat %zu FAILED triangulation_1d | reason=%s\n" RESET, feat->featid, reason.c_str());
     return false;
   }
 
   // Store it in our feature object
   feat->p_FinA = p_f;
   feat->p_FinG = R_GtoA.transpose() * feat->p_FinA + p_AinG;
+  PRINT_DEBUG("[FEAT-INIT]: feat %zu SUCCESS triangulation_1d | depth=%.3fm\n", feat->featid, p_f(2, 0));
   return true;
 }
 
@@ -365,13 +385,26 @@ bool FeatureInitializer::single_gaussnewton(std::shared_ptr<Feature> feat,
   // 1. If the feature is too close
   // 2. If the feature is invalid
   // 3. If the baseline ratio is large
-  if (feat->p_FinA(2) < _options.min_dist || feat->p_FinA(2) > _options.max_dist ||
-      (feat->p_FinA.norm() / base_line_max) > _options.max_baseline || std::isnan(feat->p_FinA.norm())) {
+  double base_ratio = feat->p_FinA.norm() / base_line_max;
+  if (feat->p_FinA(2) < _options.min_dist || feat->p_FinA(2) > _options.max_dist || base_ratio > _options.max_baseline ||
+      std::isnan(feat->p_FinA.norm())) {
+    std::string reason;
+    if (std::isnan(feat->p_FinA.norm()))
+      reason = "nan_depth";
+    else if (feat->p_FinA(2) < _options.min_dist)
+      reason = "too_close (" + std::to_string(feat->p_FinA(2)) + " < " + std::to_string(_options.min_dist) + ")";
+    else if (feat->p_FinA(2) > _options.max_dist)
+      reason = "too_far (" + std::to_string(feat->p_FinA(2)) + " > " + std::to_string(_options.max_dist) + ")";
+    else
+      reason = "bad_baseline (ratio " + std::to_string(base_ratio) + " > " + std::to_string(_options.max_baseline) + ")";
+    PRINT_DEBUG("[FEAT-INIT]: feat %zu FAILED gaussnewton | reason=%s\n" RESET, feat->featid, reason.c_str());
     return false;
   }
 
   // Finally get position in global frame
   feat->p_FinG = R_GtoA.transpose() * feat->p_FinA + p_AinG;
+  PRINT_DEBUG("[FEAT-INIT]: feat %zu SUCCESS gaussnewton | depth=%.3fm | base_ratio=%.1f\n", feat->featid, feat->p_FinA(2),
+              base_ratio);
   return true;
 }
 

@@ -158,6 +158,13 @@ public:
   void promote_homography_points_to_slam(std::shared_ptr<State> state, double timestamp,
                                          const std::vector<std::shared_ptr<ov_core::Feature>> &leftovers);
 
+  /**
+   * @brief After VIO re-initialization, snap EKF z to the correct altitude using the
+   *        preserved FCS offset. No-op if the offset has not been calibrated yet (first boot).
+   * @return true if the snap was applied, false if offset is not available.
+   */
+  bool snap_height_to_state(std::shared_ptr<State> state, double t);
+
 private:
   // ---- height helpers ----
 

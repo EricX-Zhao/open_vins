@@ -107,6 +107,13 @@ public:
    */
   void initialize_with_gt(Eigen::Matrix<double, 17, 1> imustate);
 
+  /**
+   * @brief Request a full system reset from another thread (e.g. a ROS service for testing).
+   * The actual reset is deferred and executed on the camera-processing thread at the next frame
+   * boundary, matching how the internal health check resets, so it cannot race the update.
+   */
+  void request_reset() { reset_requested = true; }
+
   /// If we are initialized or not
   bool initialized() { return is_initialized_vio && timelastupdate != -1; }
 
@@ -197,6 +204,27 @@ protected:
    */
   void retriangulate_active_tracks(const ov_core::CameraData &message);
 
+  /**
+   * @brief Creates the state and all estimator modules (trackers, propagator, initializer, updaters)
+   * from the current params. Called from the constructor and again on a health-triggered reset so we
+   * get a clean slate seeded from the original config calibration.
+   */
+  void build_modules();
+
+  /**
+   * @brief Tears down and rebuilds the estimator after a divergence so the system re-initializes.
+   * @param reason Human-readable reason logged with the reset (e.g. the offending state values).
+   */
+  void reset_system(const std::string &reason);
+
+  /**
+   * @brief Runtime health check on the current state; resets the system if it has diverged.
+   *
+   * Flags velocity divergence (|v|) and accel/gyro bias runaway, plus any non-finite state value.
+   * A short debounce avoids resetting on a single transient bad frame.
+   */
+  void check_health_and_maybe_reset();
+
   /// Manager parameters
   VioManagerOptions params;
 
@@ -252,6 +280,12 @@ protected:
   // If we did a zero velocity update
   bool did_zupt_update = false;
   bool has_moved_since_zupt = false;
+
+  // Number of consecutive unhealthy update frames seen by the health check (debounce before reset)
+  int health_bad_count = 0;
+
+  // Set by request_reset() (any thread); honored on the camera-processing thread at the next frame
+  std::atomic<bool> reset_requested{false};
 
   // Good features that where used in the last update (used in visualization)
   std::vector<Eigen::Vector3d> good_features_MSCKF;

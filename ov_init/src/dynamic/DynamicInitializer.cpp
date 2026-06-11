@@ -69,13 +69,17 @@ bool DynamicInitializer::initialize(double &timestamp, Eigen::MatrixXd &covarian
     have_old_imu_readings = true;
     it_imu = imu_data->erase(it_imu);
   }
-  if (_db->get_internal_data().size() < 0.75 * params.init_max_features) {
-    PRINT_WARNING(RED "[init-d]: only %zu valid features of required (%.0f thresh)!!\n" RESET, _db->get_internal_data().size(),
-                  0.95 * params.init_max_features);
+  size_t db_size = _db->get_internal_data().size();
+  size_t db_thresh = (size_t)(0.75 * params.init_max_features);
+  PRINT_DEBUG("[init-d]: db_feats=%zu thresh=%zu imu_readings=%zu have_old_imu=%d\n", db_size, db_thresh, imu_data->size(),
+              (int)have_old_imu_readings);
+  if (db_size < db_thresh) {
+    PRINT_WARNING(RED "[init-d]: not enough features in window: %zu < %zu (0.75 * init_max_features=%d)\n" RESET, db_size, db_thresh,
+                  params.init_max_features);
     return false;
   }
   if (imu_data->size() < 2 || !have_old_imu_readings) {
-    // PRINT_WARNING(RED "[init-d]: waiting for window to reach full size (%zu imu readings)!!\n" RESET, imu_data->size());
+    PRINT_WARNING(YELLOW "[init-d]: IMU window not ready: %zu readings, have_old=%d\n" RESET, imu_data->size(), (int)have_old_imu_readings);
     return false;
   }
 
@@ -155,11 +159,16 @@ bool DynamicInitializer::initialize(double &timestamp, Eigen::MatrixXd &covarian
 
   // Return if we do not have our full window or not enough measurements
   // Also check that we have enough features to initialize with
+  PRINT_DEBUG("[init-d]: db=%zu feats_with_enough_meas=%d/%d poses=%zu/%d (min_meas_per_feat=%d)\n", features.size(),
+              count_valid_features, min_valid_features, map_camera_times.size(), params.init_dyn_num_pose, min_num_meas_to_optimize);
   if ((int)map_camera_times.size() < params.init_dyn_num_pose) {
+    PRINT_WARNING(YELLOW "[init-d]: not enough pose slots: %zu < %d (need more window coverage)\n" RESET, map_camera_times.size(),
+                  params.init_dyn_num_pose);
     return false;
   }
   if (count_valid_features < min_valid_features) {
-    PRINT_WARNING(RED "[init-d]: only %zu valid features of required %d!!\n" RESET, count_valid_features, min_valid_features);
+    PRINT_WARNING(RED "[init-d]: too few features with >=%d observations: %d < %d (total_in_db=%zu)\n" RESET, min_num_meas_to_optimize,
+                  count_valid_features, min_valid_features, features.size());
     return false;
   }
 
@@ -898,8 +907,12 @@ bool DynamicInitializer::initialize(double &timestamp, Eigen::MatrixXd &covarian
   auto rT6 = boost::posix_time::microsec_clock::local_time();
 
   // Return if we have failed!
+  // NOTE: only reject on a true solver FAILURE (numerical breakdown). A NO_CONVERGENCE
+  // NOTE: result simply means we hit the iteration / solver-time budget (common on embedded);
+  // NOTE: that solution is still usable and the condition-number check below guards its quality.
   timestamp = newest_cam_time;
-  if (params.init_dyn_mle_max_iter != 0 && summary.termination_type != ceres::CONVERGENCE) {
+  if (params.init_dyn_mle_max_iter != 0 &&
+      (summary.termination_type == ceres::FAILURE || summary.termination_type == ceres::USER_FAILURE)) {
     PRINT_WARNING(YELLOW "[init-d]: opt failed: %s!\n" RESET, summary.message.c_str());
     free_state_memory();
     return false;

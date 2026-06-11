@@ -283,6 +283,21 @@ void UpdaterGroundPlane::recover_3d_points(const Eigen::Matrix3d &R_GtoC, const 
   }
 }
 
+bool UpdaterGroundPlane::snap_height_to_state(std::shared_ptr<State> state, double t) {
+  if (!_offset_initialized)
+    return false;
+  double h_raw;
+  if (!interp_height(t, h_raw))
+    return false;
+  double z_expected = h_raw - _h_takeoff_offset;
+  Eigen::Matrix<double, 3, 1> pos = state->_imu->pos();
+  pos(2) = z_expected;
+  state->_imu->p()->set_value(pos);
+  state->_imu->p()->set_fej(pos);
+  PRINT_INFO("[GP] z snapped from FCS after re-init: z=%.3f (h_raw=%.3f offset=%.3f)\n", z_expected, h_raw, _h_takeoff_offset);
+  return true;
+}
+
 void UpdaterGroundPlane::try_height_update(std::shared_ptr<State> state, double timestamp) {
   if (state->_clones_IMU.empty())
     return;

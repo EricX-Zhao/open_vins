@@ -101,6 +101,24 @@ struct VioManagerOptions {
   /// The path to the file we will record the timing information into
   std::string record_timing_filepath = "ov_msckf_timing.txt";
 
+  /// If we should monitor filter health at runtime and auto-reset/re-initialize on divergence
+  bool health_check_enabled = true;
+
+  /// Health: reset if velocity norm |v_IinG| exceeds this (m/s)
+  double health_max_velocity = 30.0;
+
+  /// Health: reset if any accelerometer bias component exceeds this magnitude (m/s^2)
+  double health_max_accel_bias = 1.0;
+
+  /// Health: reset if any gyroscope bias component exceeds this magnitude (rad/s)
+  double health_max_gyro_bias = 1.0;
+
+  /// Health: number of consecutive unhealthy update frames required before triggering a reset
+  int health_consecutive_count = 5;
+
+  /// Health: reset if the max diagonal of the 3x3 velocity covariance exceeds this (m/s)^2; 0 = disabled
+  double health_max_vel_cov = 0.0;
+
   /**
    * @brief This function will load print out all estimator settings loaded.
    * This allows for visual checking that everything was loaded properly from ROS/CMD parsers.
@@ -120,6 +138,12 @@ struct VioManagerOptions {
       parser->parse_config("zupt_only_at_beginning", zupt_only_at_beginning);
       parser->parse_config("record_timing_information", record_timing_information);
       parser->parse_config("record_timing_filepath", record_timing_filepath);
+      parser->parse_config("health_check_enabled", health_check_enabled, false);
+      parser->parse_config("health_max_velocity", health_max_velocity, false);
+      parser->parse_config("health_max_accel_bias", health_max_accel_bias, false);
+      parser->parse_config("health_max_gyro_bias", health_max_gyro_bias, false);
+      parser->parse_config("health_consecutive_count", health_consecutive_count, false);
+      parser->parse_config("health_max_vel_cov", health_max_vel_cov, false);
     }
     PRINT_DEBUG("  - dt_slam_delay: %.1f\n", dt_slam_delay);
     PRINT_DEBUG("  - zero_velocity_update: %d\n", try_zupt);
@@ -129,6 +153,12 @@ struct VioManagerOptions {
     PRINT_DEBUG("  - zupt_only_at_beginning?: %d\n", zupt_only_at_beginning);
     PRINT_DEBUG("  - record timing?: %d\n", (int)record_timing_information);
     PRINT_DEBUG("  - record timing filepath: %s\n", record_timing_filepath.c_str());
+    PRINT_DEBUG("  - health_check_enabled?: %d\n", (int)health_check_enabled);
+    PRINT_DEBUG("  - health_max_velocity: %.2f\n", health_max_velocity);
+    PRINT_DEBUG("  - health_max_accel_bias: %.2f\n", health_max_accel_bias);
+    PRINT_DEBUG("  - health_max_gyro_bias: %.2f\n", health_max_gyro_bias);
+    PRINT_DEBUG("  - health_consecutive_count: %d\n", health_consecutive_count);
+    PRINT_DEBUG("  - health_max_vel_cov: %.4f\n", health_max_vel_cov);
     gp_options.print_and_load(parser);
   }
 

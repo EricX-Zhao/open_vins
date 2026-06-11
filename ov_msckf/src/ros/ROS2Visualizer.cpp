@@ -93,6 +93,17 @@ ROS2Visualizer::ROS2Visualizer(std::shared_ptr<rclcpp::Node> node, std::shared_p
   it_pub_loop_img_depth = it.advertise("loop_depth", 2);
   it_pub_loop_img_depth_color = it.advertise("loop_depth_colored", 2);
 
+  // Reset service: lets us drop the current estimate and re-initialize on demand (e.g. during testing)
+  srv_reset = node->create_service<std_srvs::srv::Trigger>(
+      "reset", [this](const std::shared_ptr<std_srvs::srv::Trigger::Request> /*req*/,
+                      std::shared_ptr<std_srvs::srv::Trigger::Response> res) {
+        _app->request_reset();
+        res->success = true;
+        res->message = "reset requested; system will re-initialize on the next camera frame";
+        PRINT_INFO(YELLOW "[reset]: system reset requested via service\n" RESET);
+      });
+  PRINT_DEBUG("Advertising service: %s\n", srv_reset->get_service_name());
+
   // option to enable publishing of global to IMU transformation
   if (node->has_parameter("publish_global_to_imu_tf")) {
     node->get_parameter<bool>("publish_global_to_imu_tf", publish_global2imu_tf);
